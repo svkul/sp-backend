@@ -1,15 +1,17 @@
 import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { cleanupOpenApiDoc, ZodSerializerInterceptor, ZodValidationPipe } from 'nestjs-zod';
+import { cleanupOpenApiDoc } from 'nestjs-zod';
 import { AppModule } from './app.module';
+import type { AppConfig } from './config/configuration';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const configService = app.get<ConfigService<AppConfig, true>>(ConfigService);
+  const nodeEnv = configService.getOrThrow<AppConfig['NODE_ENV']>('NODE_ENV');
+  const port = configService.getOrThrow<AppConfig['PORT']>('PORT');
 
-  app.useGlobalPipes(new ZodValidationPipe());
-  app.useGlobalInterceptors(new ZodSerializerInterceptor());
-
-  if (process.env.NODE_ENV === 'development') {
+  if (nodeEnv === 'development') {
     const config = new DocumentBuilder()
       .setTitle('Backend API')
       .setDescription('API documentation')
@@ -20,8 +22,6 @@ async function bootstrap() {
     SwaggerModule.setup('docs', app, cleanedDocument);
   }
 
-  console.log(process.env.NODE_ENV);
-
-  await app.listen(process.env.PORT ?? 3000);
+  await app.listen(port);
 }
 bootstrap().catch((error) => console.error(error));
