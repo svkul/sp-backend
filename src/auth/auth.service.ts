@@ -50,15 +50,34 @@ export class AuthService {
       });
     }
 
-    const device = await this.prisma.device.create({
-      data: {
+    const existingDevice = await this.prisma.device.findFirst({
+      where: {
         userId: user.id,
-        name: profile.deviceName,
-        platform: profile.platform,
-        userAgent: profile.userAgent,
-        ip: profile.ip,
+        name: profile.deviceName ?? null,
+        platform: profile.platform ?? null,
+        userAgent: profile.userAgent ?? null,
       },
     });
+
+    const device = existingDevice
+      ? await this.prisma.device.update({
+          where: { id: existingDevice.id },
+          data: {
+            ip: profile.ip,
+            userAgent: profile.userAgent,
+            platform: profile.platform,
+            name: profile.deviceName,
+          },
+        })
+      : await this.prisma.device.create({
+          data: {
+            userId: user.id,
+            name: profile.deviceName,
+            platform: profile.platform,
+            userAgent: profile.userAgent,
+            ip: profile.ip,
+          },
+        });
 
     return this.issueTokens(user.id, device.id, profile);
   }
@@ -130,6 +149,60 @@ export class AuthService {
     const tokens = await this.issueTokens(session.userId, session.deviceId);
 
     return tokens;
+  }
+
+  async getAccessToken(refreshToken: string): Promise<string> {
+    const tokenHash = hashToken(refreshToken);
+
+    const session = await this.prisma.session.findFirst({
+      where: { tokenHash },
+      select: { id: true, userId: true, revoked: true, expiresAt: true },
+    });
+
+    if (!session) {
+      throw new UnauthorizedException();
+    }
+
+    if (session.revoked) {
+      await this.prisma.session.updateMany({
+        where: { userId: session.userId },
+        data: { revoked: true, revokedAt: new Date() },
+      });
+      throw new UnauthorizedException('Token reuse detected');
+    }
+
+    if (session.expiresAt < new Date()) {
+      throw new UnauthorizedException('Expired refresh token');
+    }
+
+    await this.prisma.session.update({
+      where: { id: session.id },
+      data: { lastUsedAt: new Date() },
+    });
+
+    return this.generateAccessToken(session.userId);
+  }
+
+  async hasValidSession(refreshToken: string): Promise<boolean> {
+    const tokenHash = hashToken(refreshToken);
+    const session = await this.prisma.session.findFirst({
+      where: { tokenHash },
+      select: { revoked: true, expiresAt: true },
+    });
+
+    if (!session) {
+      return false;
+    }
+
+    if (session.revoked) {
+      return false;
+    }
+
+    if (session.expiresAt < new Date()) {
+      return false;
+    }
+
+    return true;
   }
 
   // =========================

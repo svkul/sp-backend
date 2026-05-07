@@ -1,14 +1,23 @@
 import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import cookieParser from 'cookie-parser';
 import { cleanupOpenApiDoc } from 'nestjs-zod';
 import { AppModule } from './app.module';
-import type { AppConfig } from './config/configuration';
-import { appConfig } from './config/configuration';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  const config = app.get<AppConfig>(appConfig.KEY);
-  const { NODE_ENV, PORT } = config;
+  const configService = app.get(ConfigService);
+  const NODE_ENV = configService.getOrThrow<'development' | 'production' | 'test'>('app.NODE_ENV');
+  const PORT = configService.getOrThrow<number>('app.PORT');
+  const frontendUrl = configService.getOrThrow<string>('web.frontendUrl');
+
+  app.enableCors({
+    origin: frontendUrl,
+    credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  });
+  app.use(cookieParser());
 
   if (NODE_ENV === 'development') {
     const swaggerConfig = new DocumentBuilder()

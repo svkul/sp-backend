@@ -13,6 +13,10 @@ export const logoutResponseSchema = z.object({
   ok: z.literal(true),
 });
 
+export const sessionResponseSchema = z.object({
+  authenticated: z.boolean(),
+});
+
 export const oauthLoginProfileSchema = z.object({
   provider: z.string().min(1),
   providerAccountId: z.string().min(1),
@@ -28,4 +32,5 @@ export const oauthLoginProfileSchema = z.object({
 export type TokenPairResponse = z.infer<typeof tokenPairResponseSchema>;
 export type RefreshResponse = z.infer<typeof refreshResponseSchema>;
 export type LogoutResponse = z.infer<typeof logoutResponseSchema>;
+export type SessionResponse = z.infer<typeof sessionResponseSchema>;
 export type OAuthLoginProfile = z.infer<typeof oauthLoginProfileSchema>;

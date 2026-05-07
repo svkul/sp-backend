@@ -43,3 +43,5 @@ export const webConfig = registerAs('web', () => {
   const env = parseEnv();
   return { frontendUrl: env.FRONTEND_URL };
 });
+
+export type WebConfig = ConfigType<typeof webConfig>;
