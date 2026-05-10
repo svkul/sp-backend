@@ -1,12 +1,12 @@
 import { createZodDto } from 'nestjs-zod';
 import {
   logoutResponseSchema,
+  meResponseSchema,
   refreshResponseSchema,
-  sessionResponseSchema,
 } from '../../shared/schemas';
+
+export class MeResponseDto extends createZodDto(meResponseSchema) {}
 
 export class RefreshResponseDto extends createZodDto(refreshResponseSchema) {}
 
 export class LogoutResponseDto extends createZodDto(logoutResponseSchema) {}
-
-export class SessionResponseDto extends createZodDto(sessionResponseSchema) {}

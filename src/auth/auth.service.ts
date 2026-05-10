@@ -1,11 +1,16 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import type { LogoutResponse, OAuthLoginProfile, TokenPairResponse } from '../shared/schemas';
+import * as crypto from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
-import { hashToken } from './utils/tokens';
-import { generateRefreshToken } from './utils/tokens';
-import { ACCESS_TOKEN_TTL } from './constants';
-import { REFRESH_DAYS } from './constants';
+import type {
+  LogoutResponse,
+  MeResponse,
+  OAuthLoginProfile,
+  TokenPairResponse,
+} from '../shared/schemas';
+
+import { ACCESS_TOKEN_TTL, REFRESH_DAYS } from './constants';
 import type { RequestMeta } from './types/request-meta.types';
 
 @Injectable()
@@ -19,7 +24,7 @@ export class AuthService {
   // GOOGLE LOGIN (entry point)
   // =========================
 
-  async validateOAuthLogin(profile: OAuthLoginProfile): Promise<TokenPairResponse> {
+  async oAuthLogin(profile: OAuthLoginProfile): Promise<TokenPairResponse> {
     const account = await this.prisma.account.findUnique({
       where: {
         provider_providerAccountId: {
@@ -92,8 +97,8 @@ export class AuthService {
     meta?: RequestMeta,
   ): Promise<TokenPairResponse> {
     const accessToken = this.generateAccessToken(userId);
-    const refreshToken = generateRefreshToken();
-    const tokenHash = hashToken(refreshToken);
+    const refreshToken = this.generateRefreshToken();
+    const tokenHash = this.hashToken(refreshToken);
 
     await this.prisma.session.create({
       data: {
@@ -117,7 +122,7 @@ export class AuthService {
   // =========================
 
   async refresh(refreshToken: string): Promise<TokenPairResponse> {
-    const tokenHash = hashToken(refreshToken);
+    const tokenHash = this.hashToken(refreshToken);
 
     const session = await this.prisma.session.findFirst({
       where: { tokenHash },
@@ -151,8 +156,26 @@ export class AuthService {
     return tokens;
   }
 
-  async getAccessToken(refreshToken: string): Promise<string> {
-    const tokenHash = hashToken(refreshToken);
+  async me(refreshToken: string): Promise<MeResponse> {
+    const user = await this.getSessionUser(refreshToken);
+    return { user };
+  }
+
+  async meByUserId(userId: string): Promise<MeResponse> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, name: true, avatarUrl: true },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException();
+    }
+
+    return { user };
+  }
+
+  private async getSessionUser(refreshToken: string) {
+    const tokenHash = this.hashToken(refreshToken);
 
     const session = await this.prisma.session.findFirst({
       where: { tokenHash },
@@ -168,6 +191,7 @@ export class AuthService {
         where: { userId: session.userId },
         data: { revoked: true, revokedAt: new Date() },
       });
+
       throw new UnauthorizedException('Token reuse detected');
     }
 
@@ -180,29 +204,15 @@ export class AuthService {
       data: { lastUsedAt: new Date() },
     });
 
-    return this.generateAccessToken(session.userId);
-  }
-
-  async hasValidSession(refreshToken: string): Promise<boolean> {
-    const tokenHash = hashToken(refreshToken);
-    const session = await this.prisma.session.findFirst({
-      where: { tokenHash },
-      select: { revoked: true, expiresAt: true },
+    const user = await this.prisma.user.findUnique({
+      where: { id: session.userId },
+      select: { id: true, email: true, name: true, avatarUrl: true },
     });
 
-    if (!session) {
-      return false;
+    if (!user) {
+      throw new UnauthorizedException();
     }
-
-    if (session.revoked) {
-      return false;
-    }
-
-    if (session.expiresAt < new Date()) {
-      return false;
-    }
-
-    return true;
+    return user;
   }
 
   // =========================
@@ -210,7 +220,7 @@ export class AuthService {
   // =========================
 
   async logout(refreshToken: string): Promise<LogoutResponse> {
-    const tokenHash = hashToken(refreshToken);
+    const tokenHash = this.hashToken(refreshToken);
 
     await this.prisma.session.updateMany({
       where: { tokenHash },
@@ -249,5 +259,13 @@ export class AuthService {
     d.setDate(d.getDate() + REFRESH_DAYS);
 
     return d;
+  }
+
+  private generateRefreshToken() {
+    return crypto.randomBytes(64).toString('hex');
+  }
+
+  private hashToken(token: string) {
+    return crypto.createHash('sha256').update(token).digest('hex');
   }
 }

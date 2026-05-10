@@ -4,20 +4,17 @@ import { UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ZodResponse } from 'nestjs-zod';
-import type { CookieOptions, Response } from 'express';
+import type { Response } from 'express';
+
 import { AuthService } from './auth.service';
-import {
-  LogoutResponseDto,
-  RefreshResponseDto,
-  SessionResponseDto,
-} from './dto/session-actions.dto';
+import { ACCESS_TOKEN_COOKIE_MAX_AGE_MS, REFRESH_TOKEN_COOKIE_MAX_AGE_MS } from './constants';
+import { LogoutResponseDto, MeResponseDto, RefreshResponseDto } from './dto/session-actions.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import type {
   AuthenticatedRequest,
   OAuthRequest,
   RefreshTokenRequest,
 } from './types/request.types';
-import { extractRequestMeta } from './utils/request-meta';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -27,32 +24,23 @@ export class AuthController {
     private readonly configService: ConfigService,
   ) {}
 
-  private getRefreshCookieOptions(): CookieOptions {
-    const nodeEnv = this.configService.getOrThrow<'development' | 'production' | 'test'>(
-      'app.NODE_ENV',
-    );
-    const isProduction = nodeEnv === 'production';
-
-    return {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite: isProduction ? 'strict' : 'lax',
-      path: '/',
-    };
-  }
-
   private extractRefreshToken(req: RefreshTokenRequest): string {
     const cookies = req.cookies as unknown;
+    const cookieRecord =
+      typeof cookies === 'object' && cookies !== null ? (cookies as Record<string, unknown>) : null;
+    // Web flow: HttpOnly cookies (camelCase or legacy snake_case)
     const cookieToken =
-      typeof cookies === 'object' &&
-      cookies !== null &&
-      typeof (cookies as Record<string, unknown>).refresh_token === 'string'
-        ? ((cookies as Record<string, unknown>).refresh_token as string)
-        : undefined;
+      typeof cookieRecord?.refreshToken === 'string'
+        ? cookieRecord.refreshToken
+        : typeof cookieRecord?.refresh_token === 'string'
+          ? cookieRecord.refresh_token
+          : undefined;
+
     const authHeader = req.headers.authorization as unknown;
     const bearerToken =
       typeof authHeader === 'string' ? authHeader.replace('Bearer ', '') : undefined;
-    const token = cookieToken || bearerToken;
+
+    const token = bearerToken || cookieToken;
 
     if (!token) {
       throw new UnauthorizedException('Refresh token is required');
@@ -72,9 +60,13 @@ export class AuthController {
   @ApiOperation({ summary: 'Callback from Google OAuth' })
   @UseGuards(AuthGuard('google'))
   async googleCallback(@Req() req: OAuthRequest, @Res() res: Response) {
-    const { userAgent, ip } = extractRequestMeta(req);
+    const userAgent = req.headers['user-agent'];
+    const forwardedFor = req.headers['x-forwarded-for'];
+    const ip = Array.isArray(forwardedFor)
+      ? forwardedFor[0]
+      : (forwardedFor ?? req.socket.remoteAddress);
 
-    const result = await this.authService.validateOAuthLogin({
+    const result = await this.authService.oAuthLogin({
       ...req.user,
       userAgent,
       ip,
@@ -82,49 +74,48 @@ export class AuthController {
       platform: 'web',
     });
 
-    res.cookie('refresh_token', result.refreshToken, this.getRefreshCookieOptions());
-
     const frontendUrl = this.configService.getOrThrow<string>('web.frontendUrl');
-    return res.redirect(`${frontendUrl}/auth/callback`);
+    const callbackUrl = new URL('/auth/callback', frontendUrl);
+    const isProduction =
+      this.configService.getOrThrow<'development' | 'production' | 'test'>('app.NODE_ENV') ===
+      'production';
+
+    const cookieBase = {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'strict' as const,
+    };
+
+    res.cookie('accessToken', result.accessToken, {
+      ...cookieBase,
+      maxAge: ACCESS_TOKEN_COOKIE_MAX_AGE_MS,
+      path: '/',
+    });
+    res.cookie('refreshToken', result.refreshToken, {
+      ...cookieBase,
+      maxAge: REFRESH_TOKEN_COOKIE_MAX_AGE_MS,
+      path: '/api/auth/refresh',
+    });
+
+    return res.redirect(callbackUrl.toString());
   }
 
   @Post('refresh')
   @ApiOperation({ summary: 'Rotate refresh token and return new access token' })
   @ZodResponse({ type: RefreshResponseDto })
-  async refresh(@Req() req: RefreshTokenRequest, @Res({ passthrough: true }) res: Response) {
+  async refresh(@Req() req: RefreshTokenRequest) {
     const token = this.extractRefreshToken(req);
 
     const data = await this.authService.refresh(token);
-
-    res.cookie?.('refresh_token', data.refreshToken, this.getRefreshCookieOptions());
-
-    return { accessToken: data.accessToken };
+    return { accessToken: data.accessToken, refreshToken: data.refreshToken };
   }
 
-  @Post('access')
-  @ApiOperation({ summary: 'Issue access token from current refresh session without rotation' })
-  @ZodResponse({ type: RefreshResponseDto })
-  async access(@Req() req: RefreshTokenRequest) {
-    const token = this.extractRefreshToken(req);
-    const accessToken = await this.authService.getAccessToken(token);
-
-    return { accessToken };
-  }
-
-  @Get('session')
-  @ApiOperation({ summary: 'Check whether current refresh token session is valid' })
-  @ZodResponse({ type: SessionResponseDto })
-  async session(@Req() req: RefreshTokenRequest) {
-    let token: string;
-    try {
-      token = this.extractRefreshToken(req);
-    } catch {
-      return { authenticated: false };
-    }
-
-    const authenticated = await this.authService.hasValidSession(token);
-
-    return { authenticated };
+  @Get('me')
+  @ApiOperation({ summary: 'Return current user by access token' })
+  @ZodResponse({ type: MeResponseDto })
+  @UseGuards(JwtAuthGuard)
+  async me(@Req() req: AuthenticatedRequest) {
+    return this.authService.meByUserId(req.user.sub);
   }
 
   @Post('logout')
