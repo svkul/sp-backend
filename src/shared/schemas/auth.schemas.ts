@@ -25,6 +25,10 @@ export const logoutResponseSchema = z.object({
   ok: z.literal(true),
 });
 
+export const protectedResponseSchema = z.object({
+  message: z.string(),
+});
+
 export const sessionResponseSchema = z.object({
   authenticated: z.boolean(),
 });
@@ -46,5 +50,6 @@ export type RefreshResponse = z.infer<typeof refreshResponseSchema>;
 export type AuthUser = z.infer<typeof authUserSchema>;
 export type MeResponse = z.infer<typeof meResponseSchema>;
 export type LogoutResponse = z.infer<typeof logoutResponseSchema>;
+export type ProtectedResponse = z.infer<typeof protectedResponseSchema>;
 export type SessionResponse = z.infer<typeof sessionResponseSchema>;
 export type OAuthLoginProfile = z.infer<typeof oauthLoginProfileSchema>;

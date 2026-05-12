@@ -7,10 +7,12 @@ import type {
   LogoutResponse,
   MeResponse,
   OAuthLoginProfile,
+  ProtectedResponse,
   TokenPairResponse,
 } from '../shared/schemas';
+import { parseDurationMs } from '../utils/parse-duration';
 
-import { ACCESS_TOKEN_TTL, REFRESH_DAYS } from './constants';
+import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL } from './constants';
 import type { RequestMeta } from './types/request-meta.types';
 
 @Injectable()
@@ -141,7 +143,18 @@ export class AuthService {
       throw new UnauthorizedException('Token reuse detected');
     }
 
-    if (session.expiresAt < new Date()) {
+    const now = new Date();
+
+    if (session.expiresAt < now) {
+      await this.prisma.session.updateMany({
+        where: {
+          id: session.id,
+          revoked: false,
+          expiresAt: { lt: now },
+        },
+        data: { revoked: true, revokedAt: now },
+      });
+
       throw new UnauthorizedException('Expired refresh token');
     }
 
@@ -195,13 +208,24 @@ export class AuthService {
       throw new UnauthorizedException('Token reuse detected');
     }
 
-    if (session.expiresAt < new Date()) {
+    const now = new Date();
+
+    if (session.expiresAt < now) {
+      await this.prisma.session.updateMany({
+        where: {
+          id: session.id,
+          revoked: false,
+          expiresAt: { lt: now },
+        },
+        data: { revoked: true, revokedAt: now },
+      });
+
       throw new UnauthorizedException('Expired refresh token');
     }
 
     await this.prisma.session.update({
       where: { id: session.id },
-      data: { lastUsedAt: new Date() },
+      data: { lastUsedAt: now },
     });
 
     const user = await this.prisma.user.findUnique({
@@ -246,6 +270,14 @@ export class AuthService {
   }
 
   // =========================
+  // PROTECTED ROUTE
+  // =========================
+
+  protected(): ProtectedResponse {
+    return { message: 'Protected route' };
+  }
+
+  // =========================
   // JWT
   // =========================
 
@@ -254,11 +286,7 @@ export class AuthService {
   }
 
   private getRefreshExpiry() {
-    const d = new Date();
-
-    d.setDate(d.getDate() + REFRESH_DAYS);
-
-    return d;
+    return new Date(Date.now() + parseDurationMs(REFRESH_TOKEN_TTL));
   }
 
   private generateRefreshToken() {

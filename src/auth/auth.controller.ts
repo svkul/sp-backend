@@ -118,6 +118,13 @@ export class AuthController {
     return this.authService.meByUserId(req.user.sub);
   }
 
+  @Post('protected')
+  @ApiOperation({ summary: 'Protected route' })
+  @UseGuards(JwtAuthGuard)
+  protected() {
+    return this.authService.protected();
+  }
+
   @Post('logout')
   @ApiOperation({ summary: 'Revoke current refresh token session' })
   @ZodResponse({ type: LogoutResponseDto })
