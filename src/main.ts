@@ -14,7 +14,7 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const NODE_ENV = configService.getOrThrow<'development' | 'production' | 'test'>('app.NODE_ENV');
   const PORT = configService.getOrThrow<number>('app.PORT');
-  const frontendUrl = configService.getOrThrow<string>('web.frontendUrl');
+  const corsOrigins = configService.getOrThrow<string[]>('web.corsOrigins');
 
   app.use(
     helmet({
@@ -24,7 +24,7 @@ async function bootstrap() {
   );
 
   app.enableCors({
-    origin: frontendUrl,
+    origin: corsOrigins,
     credentials: true,
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   });

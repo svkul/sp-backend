@@ -10,11 +10,33 @@ export const validationSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().min(1),
   GOOGLE_CLIENT_SECRET: z.string().min(1),
   GOOGLE_CALLBACK_URL: z.url(),
+  /** Canonical web app URL (OAuth redirect base: /auth/callback). */
   FRONTEND_URL: z.url(),
+  /** Optional comma-separated extra browser origins for CORS (e.g. marketing on www). FRONTEND_URL is always included. */
+  CORS_URL: z.string().optional().default(''),
 });
 
 type EnvConfig = z.infer<typeof validationSchema>;
 const parseEnv = (): EnvConfig => validationSchema.parse(process.env);
+
+function parseCommaSeparatedUrls(raw: string): string[] {
+  if (!raw.trim()) {
+    return [];
+  }
+  const urls = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const u of urls) {
+    const parsed = z.string().url().safeParse(u);
+    if (!parsed.success) {
+      throw new Error(
+        `Invalid URL in CORS_URL: "${u}". Use full absolute URLs separated by commas.`,
+      );
+    }
+  }
+  return urls;
+}
 
 export const appConfig = registerAs('app', () => {
   const env = parseEnv();
@@ -45,7 +67,12 @@ export const oauthConfig = registerAs('oauth', () => {
 
 export const webConfig = registerAs('web', () => {
   const env = parseEnv();
-  return { frontendUrl: env.FRONTEND_URL };
+  const extraOrigins = parseCommaSeparatedUrls(env.CORS_URL);
+  const corsOrigins = [...new Set([env.FRONTEND_URL, ...extraOrigins])];
+  return {
+    frontendUrl: env.FRONTEND_URL,
+    corsOrigins,
+  };
 });
 
 export type WebConfig = ConfigType<typeof webConfig>;
