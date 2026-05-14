@@ -1,6 +1,7 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { Prisma } from '@prisma/client';
 import * as crypto from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
@@ -112,14 +113,16 @@ export class AuthService {
     userId: string,
     deviceId: string | null,
     context: SessionIssueContext,
+    tx?: Prisma.TransactionClient,
   ): Promise<TokenPairResponse> {
+    const db = tx ?? this.prisma;
     const accessToken = this.generateAccessToken(userId);
     const refreshToken = this.generateRefreshToken();
     const tokenHash = this.hashToken(refreshToken);
 
     const expiresAt = this.computeRefreshExpiresAt(context.client, context.absoluteExpiresAt);
 
-    await this.prisma.session.create({
+    await db.session.create({
       data: {
         userId,
         deviceId: deviceId ?? undefined,
@@ -145,61 +148,70 @@ export class AuthService {
   async refresh(refreshToken: string): Promise<TokenPairResponse> {
     const tokenHash = this.hashToken(refreshToken);
 
-    const session = await this.prisma.session.findFirst({
-      where: { tokenHash },
-    });
-
-    if (!session) throw new UnauthorizedException();
-
-    // reuse detection
-
-    if (session.revoked) {
-      await this.prisma.session.updateMany({
-        where: { userId: session.userId },
-        data: { revoked: true, revokedAt: new Date() },
+    return this.prisma.$transaction(async (tx) => {
+      const session = await tx.session.findUnique({
+        where: { tokenHash },
       });
 
-      throw new UnauthorizedException('Token reuse detected');
-    }
+      if (!session) {
+        throw new UnauthorizedException();
+      }
 
-    const now = new Date();
+      const now = new Date();
 
-    if (session.absoluteExpiresAt <= now) {
-      await this.prisma.session.updateMany({
+      if (session.revoked) {
+        await tx.session.updateMany({
+          where: { userId: session.userId, revoked: false },
+          data: { revoked: true, revokedAt: now },
+        });
+
+        throw new UnauthorizedException('Token reuse detected');
+      }
+
+      if (session.absoluteExpiresAt <= now) {
+        await tx.session.updateMany({
+          where: { id: session.id, revoked: false },
+          data: { revoked: true, revokedAt: now },
+        });
+
+        throw new UnauthorizedException('Refresh session expired');
+      }
+
+      if (session.expiresAt < now) {
+        await tx.session.updateMany({
+          where: { id: session.id, revoked: false },
+          data: { revoked: true, revokedAt: now },
+        });
+
+        throw new UnauthorizedException('Expired refresh token');
+      }
+
+      const updated = await tx.session.updateMany({
         where: { id: session.id, revoked: false },
         data: { revoked: true, revokedAt: now },
       });
 
-      throw new UnauthorizedException('Refresh session expired');
-    }
+      if (updated.count !== 1) {
+        await tx.session.updateMany({
+          where: { userId: session.userId, revoked: false },
+          data: { revoked: true, revokedAt: now },
+        });
 
-    if (session.expiresAt < now) {
-      await this.prisma.session.updateMany({
-        where: {
-          id: session.id,
-          revoked: false,
-          expiresAt: { lt: now },
+        throw new UnauthorizedException('Token reuse detected');
+      }
+
+      return this.issueTokens(
+        session.userId,
+        session.deviceId,
+        {
+          client: this.asSessionClient(session.client),
+          absoluteExpiresAt: session.absoluteExpiresAt,
+          userAgent: session.userAgent ?? undefined,
+          ip: session.ip ?? undefined,
         },
-        data: { revoked: true, revokedAt: now },
-      });
-
-      throw new UnauthorizedException('Expired refresh token');
-    }
-
-    // revoke old
-    await this.prisma.session.update({
-      where: { id: session.id },
-      data: { revoked: true, revokedAt: new Date() },
+        tx,
+      );
     });
-
-    const tokens = await this.issueTokens(session.userId, session.deviceId, {
-      client: this.asSessionClient(session.client),
-      absoluteExpiresAt: session.absoluteExpiresAt,
-      userAgent: session.userAgent ?? undefined,
-      ip: session.ip ?? undefined,
-    });
-
-    return tokens;
   }
 
   async me(refreshToken: string): Promise<MeResponse> {
@@ -223,7 +235,7 @@ export class AuthService {
   private async getSessionUser(refreshToken: string) {
     const tokenHash = this.hashToken(refreshToken);
 
-    const session = await this.prisma.session.findFirst({
+    const session = await this.prisma.session.findUnique({
       where: { tokenHash },
       select: {
         id: true,
@@ -240,7 +252,7 @@ export class AuthService {
 
     if (session.revoked) {
       await this.prisma.session.updateMany({
-        where: { userId: session.userId },
+        where: { userId: session.userId, revoked: false },
         data: { revoked: true, revokedAt: new Date() },
       });
 
@@ -260,11 +272,7 @@ export class AuthService {
 
     if (session.expiresAt < now) {
       await this.prisma.session.updateMany({
-        where: {
-          id: session.id,
-          revoked: false,
-          expiresAt: { lt: now },
-        },
+        where: { id: session.id, revoked: false },
         data: { revoked: true, revokedAt: now },
       });
 

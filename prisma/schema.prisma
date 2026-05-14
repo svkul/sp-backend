@@ -45,7 +45,7 @@ model Session {
   userId         String
   deviceId       String?
 
-  tokenHash      String
+  tokenHash      String   @unique
 
   /** web | ios | android — drives refresh TTL (see authConfig). */
   client             String   @default("web")
@@ -68,7 +68,6 @@ model Session {
 
   @@index([userId])
   @@index([deviceId])
-  @@index([tokenHash])
 }
 
 model Device {

@@ -7,7 +7,7 @@ export interface AuthenticatedUser {
 
 export type RefreshTokenRequest = Request & {
   cookies?: {
-    refresh_token?: string;
+    refreshToken?: string;
   };
 };
 

@@ -30,19 +30,17 @@ export class AuthController {
     const cookies = req.cookies as unknown;
     const cookieRecord =
       typeof cookies === 'object' && cookies !== null ? (cookies as Record<string, unknown>) : null;
-    // Web flow: HttpOnly cookies (camelCase or legacy snake_case)
+    // Web: HttpOnly cookie `refreshToken`. Mobile: Authorization Bearer (preferred when both exist).
     const cookieToken =
-      typeof cookieRecord?.refreshToken === 'string'
-        ? cookieRecord.refreshToken
-        : typeof cookieRecord?.refresh_token === 'string'
-          ? cookieRecord.refresh_token
-          : undefined;
+      typeof cookieRecord?.refreshToken === 'string' ? cookieRecord.refreshToken : undefined;
 
-    const authHeader = req.headers.authorization as unknown;
+    const authHeader = req.headers.authorization;
     const bearerToken =
-      typeof authHeader === 'string' ? authHeader.replace('Bearer ', '') : undefined;
+      typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim() || undefined
+        : undefined;
 
-    const token = bearerToken || cookieToken;
+    const token = bearerToken ?? cookieToken;
 
     if (!token) {
       throw new UnauthorizedException('Refresh token is required');
