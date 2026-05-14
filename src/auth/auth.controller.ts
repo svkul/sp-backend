@@ -2,13 +2,18 @@ import { Controller, Get, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { Throttle } from '@nestjs/throttler';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ZodResponse } from 'nestjs-zod';
 import type { Response } from 'express';
 
 import { getClientIp } from '../utils/get-client-ip';
 import { AuthService } from './auth.service';
-import { ACCESS_TOKEN_COOKIE_MAX_AGE_MS, REFRESH_TOKEN_COOKIE_MAX_AGE_MS } from './constants';
+import {
+  ACCESS_TOKEN_COOKIE_MAX_AGE_MS,
+  REFRESH_TOKEN_COOKIE_MAX_AGE_MS,
+  THROTTLE_AUTH_SENSITIVE,
+} from './constants';
 import { LogoutResponseDto, MeResponseDto, RefreshResponseDto } from './dto/session-actions.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import type {
@@ -57,6 +62,7 @@ export class AuthController {
     // Passport handles redirect to OAuth provider.
   }
 
+  @Throttle(THROTTLE_AUTH_SENSITIVE)
   @Get('google/callback')
   @ApiOperation({ summary: 'Callback from Google OAuth' })
   @UseGuards(AuthGuard('google'))
@@ -98,6 +104,7 @@ export class AuthController {
     return res.redirect(callbackUrl.toString());
   }
 
+  @Throttle(THROTTLE_AUTH_SENSITIVE)
   @Post('refresh')
   @ApiOperation({ summary: 'Rotate refresh token and return new access token' })
   @ZodResponse({ type: RefreshResponseDto })
@@ -123,6 +130,7 @@ export class AuthController {
     return this.authService.protected();
   }
 
+  @Throttle(THROTTLE_AUTH_SENSITIVE)
   @Post('logout')
   @ApiOperation({ summary: 'Revoke current refresh token session' })
   @ZodResponse({ type: LogoutResponseDto })
@@ -132,6 +140,7 @@ export class AuthController {
     return this.authService.logout(token);
   }
 
+  @Throttle(THROTTLE_AUTH_SENSITIVE)
   @Post('logout-all')
   @ApiOperation({ summary: 'Revoke all sessions for current user' })
   @ZodResponse({ type: LogoutResponseDto })
