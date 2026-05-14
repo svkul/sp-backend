@@ -6,6 +6,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ZodResponse } from 'nestjs-zod';
 import type { Response } from 'express';
 
+import { getClientIp } from '../utils/get-client-ip';
 import { AuthService } from './auth.service';
 import { ACCESS_TOKEN_COOKIE_MAX_AGE_MS, REFRESH_TOKEN_COOKIE_MAX_AGE_MS } from './constants';
 import { LogoutResponseDto, MeResponseDto, RefreshResponseDto } from './dto/session-actions.dto';
@@ -61,10 +62,7 @@ export class AuthController {
   @UseGuards(AuthGuard('google'))
   async googleCallback(@Req() req: OAuthRequest, @Res() res: Response) {
     const userAgent = req.headers['user-agent'];
-    const forwardedFor = req.headers['x-forwarded-for'];
-    const ip = Array.isArray(forwardedFor)
-      ? forwardedFor[0]
-      : (forwardedFor ?? req.socket.remoteAddress);
+    const ip = getClientIp(req);
 
     const result = await this.authService.oAuthLogin({
       ...req.user,

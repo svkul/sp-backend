@@ -6,6 +6,7 @@ export const validationSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']),
   DATABASE_URL: z.string().min(1),
   JWT_ACCESS_SECRET: z.string().min(1),
+  COOKIE_SECRET: z.string().min(1),
   GOOGLE_CLIENT_ID: z.string().min(1),
   GOOGLE_CLIENT_SECRET: z.string().min(1),
   GOOGLE_CALLBACK_URL: z.url(),
@@ -27,7 +28,10 @@ export type AppConfig = ConfigType<typeof appConfig>;
 
 export const authConfig = registerAs('auth', () => {
   const env = parseEnv();
-  return { jwtAccessSecret: env.JWT_ACCESS_SECRET };
+  return {
+    jwtAccessSecret: env.JWT_ACCESS_SECRET,
+    cookieSecret: env.COOKIE_SECRET,
+  };
 });
 
 export const oauthConfig = registerAs('oauth', () => {
