@@ -13,6 +13,8 @@ import type {
   TokenPairResponse,
 } from '../shared/schemas';
 
+import { AuthAuditService, type AuthAuditPayload } from './auth-audit.service';
+import { AUTH_EVENT_TYPE } from './auth-event-types';
 import {
   mapPlatformToSessionClient,
   type SessionClient,
@@ -31,6 +33,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly authAudit: AuthAuditService,
   ) {}
 
   // =========================
@@ -97,12 +100,24 @@ export class AuthService {
           },
         });
 
-    return this.issueTokens(user.id, device.id, {
+    const tokens = await this.issueTokens(user.id, device.id, {
       client: mapPlatformToSessionClient(profile.platform),
       absoluteExpiresAt: this.newRefreshChainAbsoluteExpiry(),
       userAgent: profile.userAgent,
       ip: profile.ip,
     });
+
+    const client = mapPlatformToSessionClient(profile.platform);
+    this.authAudit.record({
+      type: AUTH_EVENT_TYPE.LOGIN_SUCCESS,
+      userId: user.id,
+      client,
+      ip: profile.ip ?? undefined,
+      userAgent: profile.userAgent ?? undefined,
+      meta: { provider: profile.provider },
+    });
+
+    return tokens;
   }
 
   // =========================
@@ -147,71 +162,111 @@ export class AuthService {
 
   async refresh(refreshToken: string): Promise<TokenPairResponse> {
     const tokenHash = this.hashToken(refreshToken);
+    let failure: AuthAuditPayload | undefined;
 
-    return this.prisma.$transaction(async (tx) => {
-      const session = await tx.session.findUnique({
-        where: { tokenHash },
-      });
-
-      if (!session) {
-        throw new UnauthorizedException();
-      }
-
-      const now = new Date();
-
-      if (session.revoked) {
-        await tx.session.updateMany({
-          where: { userId: session.userId, revoked: false },
-          data: { revoked: true, revokedAt: now },
+    try {
+      const txResult = await this.prisma.$transaction(async (tx) => {
+        const session = await tx.session.findUnique({
+          where: { tokenHash },
         });
 
-        throw new UnauthorizedException('Token reuse detected');
-      }
+        if (!session) {
+          failure = {
+            type: AUTH_EVENT_TYPE.REFRESH_FAIL,
+            meta: { reason: 'unknown_token' },
+          };
+          throw new UnauthorizedException();
+        }
 
-      if (session.absoluteExpiresAt <= now) {
-        await tx.session.updateMany({
+        const now = new Date();
+
+        if (session.revoked) {
+          await tx.session.updateMany({
+            where: { userId: session.userId, revoked: false },
+            data: { revoked: true, revokedAt: now },
+          });
+          failure = {
+            type: AUTH_EVENT_TYPE.REUSE_DETECTED,
+            ...this.sessionAuditFields(session),
+            meta: { reason: 'revoked_token_presented' },
+          };
+          throw new UnauthorizedException('Token reuse detected');
+        }
+
+        if (session.absoluteExpiresAt <= now) {
+          await tx.session.updateMany({
+            where: { id: session.id, revoked: false },
+            data: { revoked: true, revokedAt: now },
+          });
+          failure = {
+            type: AUTH_EVENT_TYPE.REFRESH_FAIL,
+            ...this.sessionAuditFields(session),
+            meta: { reason: 'absolute_expired' },
+          };
+          throw new UnauthorizedException('Refresh session expired');
+        }
+
+        if (session.expiresAt < now) {
+          await tx.session.updateMany({
+            where: { id: session.id, revoked: false },
+            data: { revoked: true, revokedAt: now },
+          });
+          failure = {
+            type: AUTH_EVENT_TYPE.REFRESH_FAIL,
+            ...this.sessionAuditFields(session),
+            meta: { reason: 'sliding_expired' },
+          };
+          throw new UnauthorizedException('Expired refresh token');
+        }
+
+        const updated = await tx.session.updateMany({
           where: { id: session.id, revoked: false },
           data: { revoked: true, revokedAt: now },
         });
 
-        throw new UnauthorizedException('Refresh session expired');
-      }
+        if (updated.count !== 1) {
+          await tx.session.updateMany({
+            where: { userId: session.userId, revoked: false },
+            data: { revoked: true, revokedAt: now },
+          });
+          failure = {
+            type: AUTH_EVENT_TYPE.REUSE_DETECTED,
+            ...this.sessionAuditFields(session),
+            meta: { reason: 'rotation_race' },
+          };
+          throw new UnauthorizedException('Token reuse detected');
+        }
 
-      if (session.expiresAt < now) {
-        await tx.session.updateMany({
-          where: { id: session.id, revoked: false },
-          data: { revoked: true, revokedAt: now },
-        });
+        const tokens = await this.issueTokens(
+          session.userId,
+          session.deviceId,
+          {
+            client: this.asSessionClient(session.client),
+            absoluteExpiresAt: session.absoluteExpiresAt,
+            userAgent: session.userAgent ?? undefined,
+            ip: session.ip ?? undefined,
+          },
+          tx,
+        );
 
-        throw new UnauthorizedException('Expired refresh token');
-      }
-
-      const updated = await tx.session.updateMany({
-        where: { id: session.id, revoked: false },
-        data: { revoked: true, revokedAt: now },
+        return {
+          ...tokens,
+          audit: this.sessionAuditFields(session),
+        };
       });
 
-      if (updated.count !== 1) {
-        await tx.session.updateMany({
-          where: { userId: session.userId, revoked: false },
-          data: { revoked: true, revokedAt: now },
-        });
+      this.authAudit.record({
+        type: AUTH_EVENT_TYPE.REFRESH,
+        ...txResult.audit,
+      });
 
-        throw new UnauthorizedException('Token reuse detected');
+      return { accessToken: txResult.accessToken, refreshToken: txResult.refreshToken };
+    } catch (e) {
+      if (failure) {
+        this.authAudit.record(failure);
       }
-
-      return this.issueTokens(
-        session.userId,
-        session.deviceId,
-        {
-          client: this.asSessionClient(session.client),
-          absoluteExpiresAt: session.absoluteExpiresAt,
-          userAgent: session.userAgent ?? undefined,
-          ip: session.ip ?? undefined,
-        },
-        tx,
-      );
-    });
+      throw e;
+    }
   }
 
   async me(refreshToken: string): Promise<MeResponse> {
@@ -240,13 +295,20 @@ export class AuthService {
       select: {
         id: true,
         userId: true,
+        client: true,
         revoked: true,
         expiresAt: true,
         absoluteExpiresAt: true,
+        userAgent: true,
+        ip: true,
       },
     });
 
     if (!session) {
+      this.authAudit.record({
+        type: AUTH_EVENT_TYPE.REFRESH_FAIL,
+        meta: { reason: 'unknown_token', context: 'session_resolve' },
+      });
       throw new UnauthorizedException();
     }
 
@@ -255,7 +317,11 @@ export class AuthService {
         where: { userId: session.userId, revoked: false },
         data: { revoked: true, revokedAt: new Date() },
       });
-
+      this.authAudit.record({
+        type: AUTH_EVENT_TYPE.REUSE_DETECTED,
+        ...this.sessionAuditFields(session),
+        meta: { reason: 'revoked_token_presented', context: 'session_resolve' },
+      });
       throw new UnauthorizedException('Token reuse detected');
     }
 
@@ -266,7 +332,11 @@ export class AuthService {
         where: { id: session.id, revoked: false },
         data: { revoked: true, revokedAt: now },
       });
-
+      this.authAudit.record({
+        type: AUTH_EVENT_TYPE.REFRESH_FAIL,
+        ...this.sessionAuditFields(session),
+        meta: { reason: 'absolute_expired', context: 'session_resolve' },
+      });
       throw new UnauthorizedException('Refresh session expired');
     }
 
@@ -275,7 +345,11 @@ export class AuthService {
         where: { id: session.id, revoked: false },
         data: { revoked: true, revokedAt: now },
       });
-
+      this.authAudit.record({
+        type: AUTH_EVENT_TYPE.REFRESH_FAIL,
+        ...this.sessionAuditFields(session),
+        meta: { reason: 'sliding_expired', context: 'session_resolve' },
+      });
       throw new UnauthorizedException('Expired refresh token');
     }
 
@@ -290,6 +364,12 @@ export class AuthService {
     });
 
     if (!user) {
+      this.authAudit.record({
+        type: AUTH_EVENT_TYPE.REFRESH_FAIL,
+        userId: session.userId,
+        client: session.client,
+        meta: { reason: 'user_missing', context: 'session_resolve' },
+      });
       throw new UnauthorizedException();
     }
     return user;
@@ -302,24 +382,48 @@ export class AuthService {
   async logout(refreshToken: string): Promise<LogoutResponse> {
     const tokenHash = this.hashToken(refreshToken);
 
-    await this.prisma.session.updateMany({
+    const session = await this.prisma.session.findUnique({
       where: { tokenHash },
+      select: { userId: true, client: true, userAgent: true, ip: true, revoked: true },
+    });
+
+    const result = await this.prisma.session.updateMany({
+      where: { tokenHash, revoked: false },
       data: {
         revoked: true,
         revokedAt: new Date(),
       },
     });
 
+    if (session && result.count > 0) {
+      this.authAudit.record({
+        type: AUTH_EVENT_TYPE.LOGOUT,
+        ...this.sessionAuditFields(session),
+      });
+    } else if (!session) {
+      this.authAudit.record({
+        type: AUTH_EVENT_TYPE.LOGOUT,
+        meta: { outcome: 'unknown_refresh_token' },
+      });
+    }
+
     return { ok: true };
   }
 
-  async logoutAll(userId: string): Promise<LogoutResponse> {
+  async logoutAll(userId: string, meta?: RequestMeta): Promise<LogoutResponse> {
     await this.prisma.session.updateMany({
       where: { userId },
       data: {
         revoked: true,
         revokedAt: new Date(),
       },
+    });
+
+    this.authAudit.record({
+      type: AUTH_EVENT_TYPE.LOGOUT_ALL,
+      userId,
+      ip: meta?.ip,
+      userAgent: meta?.userAgent,
     });
 
     return { ok: true };
@@ -367,5 +471,19 @@ export class AuthService {
 
   private hashToken(token: string) {
     return crypto.createHash('sha256').update(token).digest('hex');
+  }
+
+  private sessionAuditFields(session: {
+    userId: string;
+    client: string;
+    userAgent: string | null;
+    ip: string | null;
+  }): Pick<AuthAuditPayload, 'userId' | 'client' | 'ip' | 'userAgent'> {
+    return {
+      userId: session.userId,
+      client: session.client,
+      ip: session.ip ?? undefined,
+      userAgent: session.userAgent ?? undefined,
+    };
   }
 }

@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
+import { AuthAuditService } from './auth-audit.service';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 
@@ -13,6 +14,10 @@ describe('AuthController', () => {
         {
           provide: AuthService,
           useValue: { signIn: jest.fn() },
+        },
+        {
+          provide: AuthAuditService,
+          useValue: { record: jest.fn() },
         },
         {
           provide: ConfigService,

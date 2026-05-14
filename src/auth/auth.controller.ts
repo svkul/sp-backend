@@ -145,6 +145,8 @@ export class AuthController {
   @ZodResponse({ type: LogoutResponseDto })
   @UseGuards(JwtAuthGuard)
   async logoutAll(@Req() req: AuthenticatedRequest) {
-    return this.authService.logoutAll(req.user.sub);
+    const userAgent = req.headers['user-agent'];
+    const ip = getClientIp(req);
+    return this.authService.logoutAll(req.user.sub, { userAgent, ip });
   }
 }
