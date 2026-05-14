@@ -14,6 +14,12 @@ export const validationSchema = z.object({
   JWT_AUDIENCE: z.string().min(1),
   /** Access token lifetime, e.g. "15m", "1h". */
   JWT_ACCESS_TTL: z.string().min(1).default('1m'),
+  /** Sliding refresh TTL for web sessions (cookie + Session.client = web). */
+  REFRESH_TOKEN_TTL_WEB: z.string().min(1).default('14d'),
+  /** Sliding refresh TTL for mobile clients (ios / android). */
+  REFRESH_TOKEN_TTL_MOBILE: z.string().min(1).default('90d'),
+  /** Maximum lifetime of a refresh chain from first login (cap on absoluteExpiresAt). */
+  REFRESH_TOKEN_ABSOLUTE_MAX: z.string().min(1).default('180d'),
   COOKIE_SECRET: z.string().min(1),
   GOOGLE_CLIENT_ID: z.string().min(1),
   GOOGLE_CLIENT_SECRET: z.string().min(1),
@@ -67,6 +73,12 @@ export const authConfig = registerAs('auth', () => {
     jwtAudience: env.JWT_AUDIENCE,
     accessTtl,
     accessTokenCookieMaxAgeMs: parseDurationMs(accessTtl),
+    refreshTokenTtlWeb: env.REFRESH_TOKEN_TTL_WEB,
+    refreshTokenTtlMobile: env.REFRESH_TOKEN_TTL_MOBILE,
+    refreshTokenAbsoluteMax: env.REFRESH_TOKEN_ABSOLUTE_MAX,
+    refreshTokenTtlWebMs: parseDurationMs(env.REFRESH_TOKEN_TTL_WEB),
+    refreshTokenTtlMobileMs: parseDurationMs(env.REFRESH_TOKEN_TTL_MOBILE),
+    refreshTokenAbsoluteMaxMs: parseDurationMs(env.REFRESH_TOKEN_ABSOLUTE_MAX),
   };
 });
 

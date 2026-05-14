@@ -47,6 +47,11 @@ model Session {
 
   tokenHash      String
 
+  /** web | ios | android — drives refresh TTL (see authConfig). */
+  client             String   @default("web")
+  /** Hard end of this refresh chain (copied on rotation). */
+  absoluteExpiresAt  DateTime
+
   revoked        Boolean  @default(false)
   revokedAt      DateTime?
 

@@ -1,4 +1,5 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as crypto from 'crypto';
 
@@ -10,16 +11,25 @@ import type {
   ProtectedResponse,
   TokenPairResponse,
 } from '../shared/schemas';
-import { parseDurationMs } from '../utils/parse-duration';
 
-import { REFRESH_TOKEN_TTL } from './constants';
+import {
+  mapPlatformToSessionClient,
+  type SessionClient,
+  isSessionClient,
+} from './types/session-client.types';
 import type { RequestMeta } from './types/request-meta.types';
+
+export interface SessionIssueContext extends RequestMeta {
+  client: SessionClient;
+  absoluteExpiresAt: Date;
+}
 
 @Injectable()
 export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
-    private jwt: JwtService,
+    private readonly jwt: JwtService,
+    private readonly config: ConfigService,
   ) {}
 
   // =========================
@@ -86,7 +96,12 @@ export class AuthService {
           },
         });
 
-    return this.issueTokens(user.id, device.id, profile);
+    return this.issueTokens(user.id, device.id, {
+      client: mapPlatformToSessionClient(profile.platform),
+      absoluteExpiresAt: this.newRefreshChainAbsoluteExpiry(),
+      userAgent: profile.userAgent,
+      ip: profile.ip,
+    });
   }
 
   // =========================
@@ -96,20 +111,24 @@ export class AuthService {
   private async issueTokens(
     userId: string,
     deviceId: string | null,
-    meta?: RequestMeta,
+    context: SessionIssueContext,
   ): Promise<TokenPairResponse> {
     const accessToken = this.generateAccessToken(userId);
     const refreshToken = this.generateRefreshToken();
     const tokenHash = this.hashToken(refreshToken);
+
+    const expiresAt = this.computeRefreshExpiresAt(context.client, context.absoluteExpiresAt);
 
     await this.prisma.session.create({
       data: {
         userId,
         deviceId: deviceId ?? undefined,
         tokenHash,
-        expiresAt: this.getRefreshExpiry(),
-        userAgent: meta?.userAgent,
-        ip: meta?.ip,
+        client: context.client,
+        absoluteExpiresAt: context.absoluteExpiresAt,
+        expiresAt,
+        userAgent: context.userAgent,
+        ip: context.ip,
       },
     });
 
@@ -145,6 +164,15 @@ export class AuthService {
 
     const now = new Date();
 
+    if (session.absoluteExpiresAt <= now) {
+      await this.prisma.session.updateMany({
+        where: { id: session.id, revoked: false },
+        data: { revoked: true, revokedAt: now },
+      });
+
+      throw new UnauthorizedException('Refresh session expired');
+    }
+
     if (session.expiresAt < now) {
       await this.prisma.session.updateMany({
         where: {
@@ -164,7 +192,12 @@ export class AuthService {
       data: { revoked: true, revokedAt: new Date() },
     });
 
-    const tokens = await this.issueTokens(session.userId, session.deviceId);
+    const tokens = await this.issueTokens(session.userId, session.deviceId, {
+      client: this.asSessionClient(session.client),
+      absoluteExpiresAt: session.absoluteExpiresAt,
+      userAgent: session.userAgent ?? undefined,
+      ip: session.ip ?? undefined,
+    });
 
     return tokens;
   }
@@ -192,7 +225,13 @@ export class AuthService {
 
     const session = await this.prisma.session.findFirst({
       where: { tokenHash },
-      select: { id: true, userId: true, revoked: true, expiresAt: true },
+      select: {
+        id: true,
+        userId: true,
+        revoked: true,
+        expiresAt: true,
+        absoluteExpiresAt: true,
+      },
     });
 
     if (!session) {
@@ -209,6 +248,15 @@ export class AuthService {
     }
 
     const now = new Date();
+
+    if (session.absoluteExpiresAt <= now) {
+      await this.prisma.session.updateMany({
+        where: { id: session.id, revoked: false },
+        data: { revoked: true, revokedAt: now },
+      });
+
+      throw new UnauthorizedException('Refresh session expired');
+    }
 
     if (session.expiresAt < now) {
       await this.prisma.session.updateMany({
@@ -285,8 +333,24 @@ export class AuthService {
     return this.jwt.sign({ sub: userId });
   }
 
-  private getRefreshExpiry() {
-    return new Date(Date.now() + parseDurationMs(REFRESH_TOKEN_TTL));
+  private newRefreshChainAbsoluteExpiry(): Date {
+    return new Date(Date.now() + this.config.getOrThrow<number>('auth.refreshTokenAbsoluteMaxMs'));
+  }
+
+  private getRefreshTtlMsForClient(client: SessionClient): number {
+    return client === 'web'
+      ? this.config.getOrThrow<number>('auth.refreshTokenTtlWebMs')
+      : this.config.getOrThrow<number>('auth.refreshTokenTtlMobileMs');
+  }
+
+  /** Sliding refresh deadline, capped by the chain's absolute expiry. */
+  private computeRefreshExpiresAt(client: SessionClient, absoluteExpiresAt: Date): Date {
+    const sliding = new Date(Date.now() + this.getRefreshTtlMsForClient(client));
+    return sliding.getTime() <= absoluteExpiresAt.getTime() ? sliding : absoluteExpiresAt;
+  }
+
+  private asSessionClient(value: string): SessionClient {
+    return isSessionClient(value) ? value : 'web';
   }
 
   private generateRefreshToken() {

@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -17,6 +18,20 @@ describe('AuthService', () => {
         {
           provide: JwtService,
           useValue: { sign: jest.fn() },
+        },
+        {
+          provide: ConfigService,
+          useValue: {
+            getOrThrow: jest.fn((key: string) => {
+              const n = {
+                'auth.refreshTokenAbsoluteMaxMs': 180 * 24 * 60 * 60 * 1000,
+                'auth.refreshTokenTtlWebMs': 14 * 24 * 60 * 60 * 1000,
+                'auth.refreshTokenTtlMobileMs': 90 * 24 * 60 * 60 * 1000,
+              } as const;
+              if (key in n) return n[key as keyof typeof n];
+              throw new Error(`Unexpected config key: ${key}`);
+            }),
+          },
         },
       ],
     }).compile();
