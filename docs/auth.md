@@ -38,7 +38,7 @@
   - встановити cookies **`accessToken`** та **`refreshToken`** (HttpOnly, `secure` у production, `sameSite: 'strict'`);
   - **`redirect`** на **`{FRONTEND_URL}/auth/callback`** (див. `web.frontendUrl` / `FRONTEND_URL`).
 
-Шляхи cookies (поточний код): `accessToken` — `path: '/'`; **`refreshToken`** — `path: '/api/auth/refresh'`. Ендпоінт rotation у Nest — **`POST /auth/refresh`** (без глобального префікса `/api`). Якщо браузер не надсилає refresh-cookie на `POST /auth/refresh`, вирівняйте **`path`** у `auth.controller.ts` з реальним URL API (див. також план у `Docs/auth-solution.md`: cookie path = шлях ендпоінта refresh).
+Шляхи cookies: `accessToken` — `path: '/'`; **`refreshToken`** — **`path: '/auth/refresh'`** (узгоджено з **`POST /auth/refresh`**, щоб браузер надсилав cookie лише на rotation).
 
 ### Поточний користувач
 

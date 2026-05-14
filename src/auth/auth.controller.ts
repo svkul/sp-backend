@@ -97,7 +97,7 @@ export class AuthController {
     res.cookie('refreshToken', result.refreshToken, {
       ...cookieBase,
       maxAge: refreshCookieMaxAge,
-      path: '/api/auth/refresh',
+      path: '/auth/refresh',
     });
 
     return res.redirect(callbackUrl.toString());
