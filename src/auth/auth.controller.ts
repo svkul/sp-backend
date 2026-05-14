@@ -9,11 +9,7 @@ import type { Response } from 'express';
 
 import { getClientIp } from '../utils/get-client-ip';
 import { AuthService } from './auth.service';
-import {
-  ACCESS_TOKEN_COOKIE_MAX_AGE_MS,
-  REFRESH_TOKEN_COOKIE_MAX_AGE_MS,
-  THROTTLE_AUTH_SENSITIVE,
-} from './constants';
+import { REFRESH_TOKEN_COOKIE_MAX_AGE_MS, THROTTLE_AUTH_SENSITIVE } from './constants';
 import { LogoutResponseDto, MeResponseDto, RefreshResponseDto } from './dto/session-actions.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import type {
@@ -83,6 +79,9 @@ export class AuthController {
     const isProduction =
       this.configService.getOrThrow<'development' | 'production' | 'test'>('app.NODE_ENV') ===
       'production';
+    const accessCookieMaxAge = this.configService.getOrThrow<number>(
+      'auth.accessTokenCookieMaxAgeMs',
+    );
 
     const cookieBase = {
       httpOnly: true,
@@ -92,7 +91,7 @@ export class AuthController {
 
     res.cookie('accessToken', result.accessToken, {
       ...cookieBase,
-      maxAge: ACCESS_TOKEN_COOKIE_MAX_AGE_MS,
+      maxAge: accessCookieMaxAge,
       path: '/',
     });
     res.cookie('refreshToken', result.refreshToken, {

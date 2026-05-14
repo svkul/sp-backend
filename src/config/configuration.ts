@@ -1,11 +1,19 @@
 import { registerAs, type ConfigType } from '@nestjs/config';
 import { z } from 'zod';
 
+import { parseDurationMs } from '../utils/parse-duration';
+
 export const validationSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   NODE_ENV: z.enum(['development', 'production', 'test']),
   DATABASE_URL: z.string().min(1),
   JWT_ACCESS_SECRET: z.string().min(1),
+  /** Issuer claim (`iss`) for access JWTs; must match verification in JwtStrategy. */
+  JWT_ISSUER: z.string().min(1),
+  /** Audience claim (`aud`) for access JWTs; must match verification in JwtStrategy. */
+  JWT_AUDIENCE: z.string().min(1),
+  /** Access token lifetime, e.g. "15m", "1h". */
+  JWT_ACCESS_TTL: z.string().min(1).default('1m'),
   COOKIE_SECRET: z.string().min(1),
   GOOGLE_CLIENT_ID: z.string().min(1),
   GOOGLE_CLIENT_SECRET: z.string().min(1),
@@ -50,9 +58,15 @@ export type AppConfig = ConfigType<typeof appConfig>;
 
 export const authConfig = registerAs('auth', () => {
   const env = parseEnv();
+  const accessTtl = env.JWT_ACCESS_TTL;
+
   return {
     jwtAccessSecret: env.JWT_ACCESS_SECRET,
     cookieSecret: env.COOKIE_SECRET,
+    jwtIssuer: env.JWT_ISSUER,
+    jwtAudience: env.JWT_AUDIENCE,
+    accessTtl,
+    accessTokenCookieMaxAgeMs: parseDurationMs(accessTtl),
   };
 });
 

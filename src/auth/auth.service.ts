@@ -12,7 +12,7 @@ import type {
 } from '../shared/schemas';
 import { parseDurationMs } from '../utils/parse-duration';
 
-import { ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL } from './constants';
+import { REFRESH_TOKEN_TTL } from './constants';
 import type { RequestMeta } from './types/request-meta.types';
 
 @Injectable()
@@ -282,7 +282,7 @@ export class AuthService {
   // =========================
 
   private generateAccessToken(userId: string) {
-    return this.jwt.sign({ sub: userId }, { expiresIn: ACCESS_TOKEN_TTL });
+    return this.jwt.sign({ sub: userId });
   }
 
   private getRefreshExpiry() {
