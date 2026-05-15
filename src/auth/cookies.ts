@@ -8,7 +8,11 @@ export const COOKIE_ACCESS = '__Secure-access';
 export const COOKIE_REFRESH = '__Secure-refresh';
 export const COOKIE_CSRF = '__Secure-csrf';
 
-const REFRESH_PATH = '/auth';
+// Refresh cookie is scoped to the BFF auth path on the web frontend so that
+// the browser only attaches it to /api/auth/* (refresh, logout) and never to
+// product routes or any other origin. The backend still reads it via the
+// forwarded Cookie header — path is enforced by the browser, not the server.
+const REFRESH_PATH = '/api/auth';
 const ROOT_PATH = '/';
 
 type AuthConfig = ConfigType<typeof authConfig>;
