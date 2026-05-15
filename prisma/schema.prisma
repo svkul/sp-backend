@@ -14,8 +14,13 @@ datasource db {
 model User {
   id            String   @id @default(cuid())
   email         String   @unique
+  emailVerified Boolean  @default(false)
   name          String?
   avatarUrl     String?
+  role          Role     @default(USER)
+
+  disabledAt    DateTime?
+  lastLoginAt   DateTime?
 
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -24,6 +29,25 @@ model User {
   sessions      Session[]
   devices       Device[]
   authEvents    AuthEvent[]
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model OAuthState {
+  state         String    @id
+  codeVerifier  String
+  nonce         String
+  returnTo      String?
+  ip            String?
+  userAgent     String?
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime
+  consumedAt    DateTime?
+
+  @@index([expiresAt])
 }
 
 model AuthEvent {

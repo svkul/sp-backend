@@ -1,489 +1,162 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
-import { Prisma } from '@prisma/client';
-import * as crypto from 'crypto';
+import { ForbiddenException, Injectable } from '@nestjs/common';
+import type { Session, User } from '@prisma/client';
+import { PinoLogger } from 'nestjs-pino';
 
 import { PrismaService } from '../prisma/prisma.service';
-import type {
-  LogoutResponse,
-  MeResponse,
-  OAuthLoginProfile,
-  ProtectedResponse,
-  TokenPairResponse,
-} from '../shared/schemas';
+import type { GoogleProfile } from './google-oauth.service';
+import { SessionService, type SessionClient } from './session.service';
+import { TokenService } from './token.service';
 
-import { AuthAuditService, type AuthAuditPayload } from './auth-audit.service';
-import { AUTH_EVENT_TYPE } from './auth-event-types';
-import {
-  mapPlatformToSessionClient,
-  type SessionClient,
-  isSessionClient,
-} from './types/session-client.types';
-import type { RequestMeta } from './types/request-meta.types';
-
-export interface SessionIssueContext extends RequestMeta {
+interface LoginWithGoogleArgs {
+  profile: GoogleProfile;
   client: SessionClient;
-  absoluteExpiresAt: Date;
+  ip?: string | null;
+  userAgent?: string | null;
+}
+
+interface LoginResult {
+  user: User;
+  session: Session;
+  accessToken: string;
+  refreshRaw: string;
 }
 
 @Injectable()
 export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly jwt: JwtService,
-    private readonly config: ConfigService,
-    private readonly authAudit: AuthAuditService,
-  ) {}
+    private readonly sessions: SessionService,
+    private readonly tokens: TokenService,
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(AuthService.name);
+  }
 
-  // =========================
-  // GOOGLE LOGIN (entry point)
-  // =========================
+  /**
+   * Complete the login flow after Google has authenticated the user.
+   *
+   *   1. Atomically link Google identity → existing user (by `providerAccountId`,
+   *      then by verified email), or create a new user.
+   *   2. Refuse disabled accounts.
+   *   3. Bump `lastLoginAt` + sync `emailVerified` from Google's claim.
+   *   4. Attach a Device record (one per user + UA combo, deduped softly).
+   *   5. Create a fresh session and sign an access JWT.
+   */
+  async loginWithGoogle({
+    profile,
+    client,
+    ip,
+    userAgent,
+  }: LoginWithGoogleArgs): Promise<LoginResult> {
+    const user = await this.upsertUserFromGoogle(profile);
+    if (user.disabledAt) {
+      this.logger.warn({ userId: user.id }, 'Login refused: account disabled');
+      throw new ForbiddenException('account_disabled');
+    }
 
-  async oAuthLogin(profile: OAuthLoginProfile): Promise<TokenPairResponse> {
-    const account = await this.prisma.account.findUnique({
+    const device = await this.ensureDevice({ userId: user.id, userAgent, ip, platform: client });
+
+    const { session, refreshRaw } = await this.sessions.create({
+      userId: user.id,
+      client,
+      deviceId: device?.id ?? null,
+      ip,
+      userAgent,
+    });
+
+    const accessToken = await this.tokens.signAccess({
+      userId: user.id,
+      role: user.role,
+      sid: session.id,
+    });
+
+    return { user, session, accessToken, refreshRaw };
+  }
+
+  private async upsertUserFromGoogle(profile: GoogleProfile): Promise<User> {
+    const existingAccount = await this.prisma.account.findUnique({
       where: {
         provider_providerAccountId: {
-          provider: profile.provider,
-          providerAccountId: profile.providerAccountId,
+          provider: 'google',
+          providerAccountId: profile.providerUserId,
         },
       },
-
       include: { user: true },
     });
 
-    let user = account?.user;
-
-    if (!user) {
-      user = await this.prisma.user.create({
+    if (existingAccount) {
+      return this.prisma.user.update({
+        where: { id: existingAccount.userId },
         data: {
-          email: profile.email,
-          name: profile.name,
-          avatarUrl: profile.avatarUrl,
-          accounts: {
-            create: {
-              provider: profile.provider,
-
-              providerAccountId: profile.providerAccountId,
-            },
-          },
+          name: profile.name ?? existingAccount.user.name,
+          avatarUrl: profile.picture ?? existingAccount.user.avatarUrl,
+          emailVerified: profile.emailVerified || existingAccount.user.emailVerified,
+          lastLoginAt: new Date(),
         },
       });
     }
 
-    const existingDevice = await this.prisma.device.findFirst({
-      where: {
-        userId: user.id,
-        name: profile.deviceName ?? null,
-        platform: profile.platform ?? null,
-        userAgent: profile.userAgent ?? null,
-      },
-    });
+    // Match by verified email — only if the existing user's email is also verified.
+    // Otherwise we'd risk linking to an unverified account that someone else owns.
+    const byEmail = await this.prisma.user.findUnique({ where: { email: profile.email } });
+    if (byEmail && byEmail.emailVerified) {
+      await this.prisma.account.create({
+        data: {
+          userId: byEmail.id,
+          provider: 'google',
+          providerAccountId: profile.providerUserId,
+        },
+      });
+      return this.prisma.user.update({
+        where: { id: byEmail.id },
+        data: {
+          name: profile.name ?? byEmail.name,
+          avatarUrl: profile.picture ?? byEmail.avatarUrl,
+          lastLoginAt: new Date(),
+        },
+      });
+    }
 
-    const device = existingDevice
-      ? await this.prisma.device.update({
-          where: { id: existingDevice.id },
-          data: {
-            ip: profile.ip,
-            userAgent: profile.userAgent,
-            platform: profile.platform,
-            name: profile.deviceName,
-          },
-        })
-      : await this.prisma.device.create({
-          data: {
-            userId: user.id,
-            name: profile.deviceName,
-            platform: profile.platform,
-            userAgent: profile.userAgent,
-            ip: profile.ip,
-          },
-        });
-
-    const tokens = await this.issueTokens(user.id, device.id, {
-      client: mapPlatformToSessionClient(profile.platform),
-      absoluteExpiresAt: this.newRefreshChainAbsoluteExpiry(),
-      userAgent: profile.userAgent,
-      ip: profile.ip,
-    });
-
-    const client = mapPlatformToSessionClient(profile.platform);
-    this.authAudit.record({
-      type: AUTH_EVENT_TYPE.LOGIN_SUCCESS,
-      userId: user.id,
-      client,
-      ip: profile.ip ?? undefined,
-      userAgent: profile.userAgent ?? undefined,
-      meta: { provider: profile.provider },
-    });
-
-    return tokens;
-  }
-
-  // =========================
-  // ISSUE TOKENS
-  // =========================
-
-  private async issueTokens(
-    userId: string,
-    deviceId: string | null,
-    context: SessionIssueContext,
-    tx?: Prisma.TransactionClient,
-  ): Promise<TokenPairResponse> {
-    const db = tx ?? this.prisma;
-    const accessToken = this.generateAccessToken(userId);
-    const refreshToken = this.generateRefreshToken();
-    const tokenHash = this.hashToken(refreshToken);
-
-    const expiresAt = this.computeRefreshExpiresAt(context.client, context.absoluteExpiresAt);
-
-    await db.session.create({
+    return this.prisma.user.create({
       data: {
-        userId,
-        deviceId: deviceId ?? undefined,
-        tokenHash,
-        client: context.client,
-        absoluteExpiresAt: context.absoluteExpiresAt,
-        expiresAt,
-        userAgent: context.userAgent,
-        ip: context.ip,
-      },
-    });
-
-    return {
-      accessToken,
-      refreshToken,
-    };
-  }
-
-  // =========================
-  // REFRESH (rotation)
-  // =========================
-
-  async refresh(refreshToken: string): Promise<TokenPairResponse> {
-    const tokenHash = this.hashToken(refreshToken);
-    let failure: AuthAuditPayload | undefined;
-
-    try {
-      const txResult = await this.prisma.$transaction(async (tx) => {
-        const session = await tx.session.findUnique({
-          where: { tokenHash },
-        });
-
-        if (!session) {
-          failure = {
-            type: AUTH_EVENT_TYPE.REFRESH_FAIL,
-            meta: { reason: 'unknown_token' },
-          };
-          throw new UnauthorizedException();
-        }
-
-        const now = new Date();
-
-        if (session.revoked) {
-          await tx.session.updateMany({
-            where: { userId: session.userId, revoked: false },
-            data: { revoked: true, revokedAt: now },
-          });
-          failure = {
-            type: AUTH_EVENT_TYPE.REUSE_DETECTED,
-            ...this.sessionAuditFields(session),
-            meta: { reason: 'revoked_token_presented' },
-          };
-          throw new UnauthorizedException('Token reuse detected');
-        }
-
-        if (session.absoluteExpiresAt <= now) {
-          await tx.session.updateMany({
-            where: { id: session.id, revoked: false },
-            data: { revoked: true, revokedAt: now },
-          });
-          failure = {
-            type: AUTH_EVENT_TYPE.REFRESH_FAIL,
-            ...this.sessionAuditFields(session),
-            meta: { reason: 'absolute_expired' },
-          };
-          throw new UnauthorizedException('Refresh session expired');
-        }
-
-        if (session.expiresAt < now) {
-          await tx.session.updateMany({
-            where: { id: session.id, revoked: false },
-            data: { revoked: true, revokedAt: now },
-          });
-          failure = {
-            type: AUTH_EVENT_TYPE.REFRESH_FAIL,
-            ...this.sessionAuditFields(session),
-            meta: { reason: 'sliding_expired' },
-          };
-          throw new UnauthorizedException('Expired refresh token');
-        }
-
-        const updated = await tx.session.updateMany({
-          where: { id: session.id, revoked: false },
-          data: { revoked: true, revokedAt: now },
-        });
-
-        if (updated.count !== 1) {
-          await tx.session.updateMany({
-            where: { userId: session.userId, revoked: false },
-            data: { revoked: true, revokedAt: now },
-          });
-          failure = {
-            type: AUTH_EVENT_TYPE.REUSE_DETECTED,
-            ...this.sessionAuditFields(session),
-            meta: { reason: 'rotation_race' },
-          };
-          throw new UnauthorizedException('Token reuse detected');
-        }
-
-        const tokens = await this.issueTokens(
-          session.userId,
-          session.deviceId,
-          {
-            client: this.asSessionClient(session.client),
-            absoluteExpiresAt: session.absoluteExpiresAt,
-            userAgent: session.userAgent ?? undefined,
-            ip: session.ip ?? undefined,
+        email: profile.email,
+        emailVerified: profile.emailVerified,
+        name: profile.name,
+        avatarUrl: profile.picture,
+        lastLoginAt: new Date(),
+        accounts: {
+          create: {
+            provider: 'google',
+            providerAccountId: profile.providerUserId,
           },
-          tx,
-        );
-
-        return {
-          ...tokens,
-          audit: this.sessionAuditFields(session),
-        };
-      });
-
-      this.authAudit.record({
-        type: AUTH_EVENT_TYPE.REFRESH,
-        ...txResult.audit,
-      });
-
-      return { accessToken: txResult.accessToken, refreshToken: txResult.refreshToken };
-    } catch (e) {
-      if (failure) {
-        this.authAudit.record(failure);
-      }
-      throw e;
-    }
-  }
-
-  async me(refreshToken: string): Promise<MeResponse> {
-    const user = await this.getSessionUser(refreshToken);
-    return { user };
-  }
-
-  async meByUserId(userId: string): Promise<MeResponse> {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { id: true, email: true, name: true, avatarUrl: true },
-    });
-
-    if (!user) {
-      throw new UnauthorizedException();
-    }
-
-    return { user };
-  }
-
-  private async getSessionUser(refreshToken: string) {
-    const tokenHash = this.hashToken(refreshToken);
-
-    const session = await this.prisma.session.findUnique({
-      where: { tokenHash },
-      select: {
-        id: true,
-        userId: true,
-        client: true,
-        revoked: true,
-        expiresAt: true,
-        absoluteExpiresAt: true,
-        userAgent: true,
-        ip: true,
+        },
       },
     });
-
-    if (!session) {
-      this.authAudit.record({
-        type: AUTH_EVENT_TYPE.REFRESH_FAIL,
-        meta: { reason: 'unknown_token', context: 'session_resolve' },
-      });
-      throw new UnauthorizedException();
-    }
-
-    if (session.revoked) {
-      await this.prisma.session.updateMany({
-        where: { userId: session.userId, revoked: false },
-        data: { revoked: true, revokedAt: new Date() },
-      });
-      this.authAudit.record({
-        type: AUTH_EVENT_TYPE.REUSE_DETECTED,
-        ...this.sessionAuditFields(session),
-        meta: { reason: 'revoked_token_presented', context: 'session_resolve' },
-      });
-      throw new UnauthorizedException('Token reuse detected');
-    }
-
-    const now = new Date();
-
-    if (session.absoluteExpiresAt <= now) {
-      await this.prisma.session.updateMany({
-        where: { id: session.id, revoked: false },
-        data: { revoked: true, revokedAt: now },
-      });
-      this.authAudit.record({
-        type: AUTH_EVENT_TYPE.REFRESH_FAIL,
-        ...this.sessionAuditFields(session),
-        meta: { reason: 'absolute_expired', context: 'session_resolve' },
-      });
-      throw new UnauthorizedException('Refresh session expired');
-    }
-
-    if (session.expiresAt < now) {
-      await this.prisma.session.updateMany({
-        where: { id: session.id, revoked: false },
-        data: { revoked: true, revokedAt: now },
-      });
-      this.authAudit.record({
-        type: AUTH_EVENT_TYPE.REFRESH_FAIL,
-        ...this.sessionAuditFields(session),
-        meta: { reason: 'sliding_expired', context: 'session_resolve' },
-      });
-      throw new UnauthorizedException('Expired refresh token');
-    }
-
-    await this.prisma.session.update({
-      where: { id: session.id },
-      data: { lastUsedAt: now },
-    });
-
-    const user = await this.prisma.user.findUnique({
-      where: { id: session.userId },
-      select: { id: true, email: true, name: true, avatarUrl: true },
-    });
-
-    if (!user) {
-      this.authAudit.record({
-        type: AUTH_EVENT_TYPE.REFRESH_FAIL,
-        userId: session.userId,
-        client: session.client,
-        meta: { reason: 'user_missing', context: 'session_resolve' },
-      });
-      throw new UnauthorizedException();
-    }
-    return user;
   }
 
-  // =========================
-  // LOGOUT
-  // =========================
-
-  async logout(refreshToken: string): Promise<LogoutResponse> {
-    const tokenHash = this.hashToken(refreshToken);
-
-    const session = await this.prisma.session.findUnique({
-      where: { tokenHash },
-      select: { userId: true, client: true, userAgent: true, ip: true, revoked: true },
-    });
-
-    const result = await this.prisma.session.updateMany({
-      where: { tokenHash, revoked: false },
-      data: {
-        revoked: true,
-        revokedAt: new Date(),
-      },
-    });
-
-    if (session && result.count > 0) {
-      this.authAudit.record({
-        type: AUTH_EVENT_TYPE.LOGOUT,
-        ...this.sessionAuditFields(session),
-      });
-    } else if (!session) {
-      this.authAudit.record({
-        type: AUTH_EVENT_TYPE.LOGOUT,
-        meta: { outcome: 'unknown_refresh_token' },
-      });
-    }
-
-    return { ok: true };
-  }
-
-  async logoutAll(userId: string, meta?: RequestMeta): Promise<LogoutResponse> {
-    await this.prisma.session.updateMany({
-      where: { userId },
-      data: {
-        revoked: true,
-        revokedAt: new Date(),
-      },
-    });
-
-    this.authAudit.record({
-      type: AUTH_EVENT_TYPE.LOGOUT_ALL,
-      userId,
-      ip: meta?.ip,
-      userAgent: meta?.userAgent,
-    });
-
-    return { ok: true };
-  }
-
-  // =========================
-  // PROTECTED ROUTE
-  // =========================
-
-  protected(): ProtectedResponse {
-    return { message: 'Protected route' };
-  }
-
-  // =========================
-  // JWT
-  // =========================
-
-  private generateAccessToken(userId: string) {
-    return this.jwt.sign({ sub: userId });
-  }
-
-  private newRefreshChainAbsoluteExpiry(): Date {
-    return new Date(Date.now() + this.config.getOrThrow<number>('auth.refreshTokenAbsoluteMaxMs'));
-  }
-
-  private getRefreshTtlMsForClient(client: SessionClient): number {
-    return client === 'web'
-      ? this.config.getOrThrow<number>('auth.refreshTokenTtlWebMs')
-      : this.config.getOrThrow<number>('auth.refreshTokenTtlMobileMs');
-  }
-
-  /** Sliding refresh deadline, capped by the chain's absolute expiry. */
-  private computeRefreshExpiresAt(client: SessionClient, absoluteExpiresAt: Date): Date {
-    const sliding = new Date(Date.now() + this.getRefreshTtlMsForClient(client));
-    return sliding.getTime() <= absoluteExpiresAt.getTime() ? sliding : absoluteExpiresAt;
-  }
-
-  private asSessionClient(value: string): SessionClient {
-    return isSessionClient(value) ? value : 'web';
-  }
-
-  private generateRefreshToken() {
-    return crypto.randomBytes(64).toString('hex');
-  }
-
-  private hashToken(token: string) {
-    return crypto.createHash('sha256').update(token).digest('hex');
-  }
-
-  private sessionAuditFields(session: {
+  private async ensureDevice(args: {
     userId: string;
-    client: string;
-    userAgent: string | null;
-    ip: string | null;
-  }): Pick<AuthAuditPayload, 'userId' | 'client' | 'ip' | 'userAgent'> {
-    return {
-      userId: session.userId,
-      client: session.client,
-      ip: session.ip ?? undefined,
-      userAgent: session.userAgent ?? undefined,
-    };
+    userAgent?: string | null;
+    ip?: string | null;
+    platform: SessionClient;
+  }) {
+    if (!args.userAgent) {
+      return null;
+    }
+    const recent = await this.prisma.device.findFirst({
+      where: { userId: args.userId, userAgent: args.userAgent, platform: args.platform },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (recent) {
+      return recent;
+    }
+    return this.prisma.device.create({
+      data: {
+        userId: args.userId,
+        platform: args.platform,
+        userAgent: args.userAgent,
+        ip: args.ip ?? null,
+      },
+    });
   }
 }

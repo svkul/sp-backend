@@ -1,182 +1,280 @@
-import { Controller, Get, Post, Req, Res, UseGuards } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { UnauthorizedException } from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
-import { Throttle } from '@nestjs/throttler';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { ZodResponse } from 'nestjs-zod';
-import type { CookieOptions, Response } from 'express';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Inject,
+  Post,
+  Req,
+  Res,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { ConfigType } from '@nestjs/config';
+import type { Request, Response } from 'express';
+import { PinoLogger } from 'nestjs-pino';
+import { ZodValidationPipe } from 'nestjs-zod';
 
-import { getClientIp } from '../utils/get-client-ip';
+import { appConfig, authConfig, webConfig } from '../config/configuration';
+import { PrismaService } from '../prisma/prisma.service';
+import { COOKIE_REFRESH, clearAuthCookies, setAuthCookies } from './cookies';
+import { CurrentUser } from './decorators/current-user.decorator';
+import { Public } from './decorators/public.decorator';
+import { SkipCsrf } from './decorators/skip-csrf.decorator';
+import { GoogleOAuthService, OAuthStateError } from './google-oauth.service';
+import { safeReturnTo } from './return-to';
+import { InvalidRefreshTokenError, SessionService, type SessionClient } from './session.service';
+import { TurnstileService } from './turnstile.service';
+import { TokenService } from './token.service';
 import { AuthService } from './auth.service';
-import { THROTTLE_AUTH_SENSITIVE } from './constants';
-import { LogoutResponseDto, MeResponseDto, RefreshResponseDto } from './dto/session-actions.dto';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
-import type {
-  AuthenticatedRequest,
-  OAuthRequest,
-  RefreshTokenRequest,
-} from './types/request.types';
+import { type GoogleStartRequest, googleStartRequestSchema } from '../shared/schemas/auth.schemas';
+import { getClientIp } from '../utils/get-client-ip';
+import type { AuthenticatedUser } from './types';
 
-/** Path prefix so refresh cookie is sent to refresh, logout, and similar `/auth/*` routes. */
-const REFRESH_COOKIE_PATH = '/auth';
+const TURNSTILE_ACTION_LOGIN = 'login';
 
-@ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
   constructor(
+    @Inject(appConfig.KEY) private readonly app: ConfigType<typeof appConfig>,
+    @Inject(authConfig.KEY) private readonly auth: ConfigType<typeof authConfig>,
+    @Inject(webConfig.KEY) private readonly web: ConfigType<typeof webConfig>,
     private readonly authService: AuthService,
-    private readonly configService: ConfigService,
-  ) {}
-
-  private readRefreshTokenInput(req: RefreshTokenRequest): string | undefined {
-    const cookies = req.cookies as unknown;
-    const cookieRecord =
-      typeof cookies === 'object' && cookies !== null ? (cookies as Record<string, unknown>) : null;
-    const cookieToken =
-      typeof cookieRecord?.refreshToken === 'string' ? cookieRecord.refreshToken : undefined;
-
-    const authHeader = req.headers.authorization;
-    const bearerToken =
-      typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
-        ? authHeader.slice('Bearer '.length).trim() || undefined
-        : undefined;
-
-    return bearerToken ?? cookieToken;
+    private readonly googleOauth: GoogleOAuthService,
+    private readonly turnstile: TurnstileService,
+    private readonly sessions: SessionService,
+    private readonly tokens: TokenService,
+    private readonly prisma: PrismaService,
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(AuthController.name);
   }
 
-  private extractRefreshToken(req: RefreshTokenRequest): string {
-    const token = this.readRefreshTokenInput(req);
-    if (!token) {
-      throw new UnauthorizedException('Refresh token is required');
+  /**
+   * Step 1 of the OAuth dance. Frontend renders Turnstile, gets the token,
+   * POSTs it here. We verify with Cloudflare, persist OAuth state (PKCE/nonce),
+   * and return the Google authorization URL for the client to redirect to.
+   *
+   * Anonymous endpoint — no auth cookies attached, no CSRF token expected
+   * (Turnstile is the bot/abuse defense for this path).
+   */
+  @Public()
+  @SkipCsrf()
+  @Post('google/start')
+  async googleStart(
+    @Body(new ZodValidationPipe(googleStartRequestSchema)) body: GoogleStartRequest,
+    @Req() req: Request,
+  ): Promise<{ redirectUrl: string }> {
+    const ip = getClientIp(req) ?? null;
+    const userAgent = req.headers['user-agent'] ?? null;
+
+    const ok = await this.turnstile.verify(
+      body.turnstileToken,
+      ip ?? undefined,
+      TURNSTILE_ACTION_LOGIN,
+    );
+    if (!ok) {
+      throw new BadRequestException('turnstile_failed');
     }
-    return token;
-  }
 
-  private isProduction(): boolean {
-    return (
-      this.configService.getOrThrow<'development' | 'production' | 'test'>('app.NODE_ENV') ===
-      'production'
-    );
-  }
+    const returnTo = body.returnTo ? safeReturnTo(body.returnTo, this.web.frontendUrl) : null;
 
-  private webCookieBase(): Pick<CookieOptions, 'httpOnly' | 'secure' | 'sameSite' | 'domain'> {
-    const domain = this.configService.get<string>('auth.cookieDomain');
-    return {
-      httpOnly: true,
-      secure: this.isProduction(),
-      sameSite: 'lax',
-      ...(domain ? { domain } : {}),
-    };
-  }
-
-  private setWebAuthCookies(res: Response, accessToken: string, refreshToken: string): void {
-    const accessCookieMaxAge = this.configService.getOrThrow<number>(
-      'auth.accessTokenCookieMaxAgeMs',
-    );
-    const refreshCookieMaxAge = this.configService.getOrThrow<number>('auth.refreshTokenTtlWebMs');
-    const base = this.webCookieBase();
-
-    res.cookie('accessToken', accessToken, {
-      ...base,
-      maxAge: accessCookieMaxAge,
-      path: '/',
-    });
-
-    res.cookie('refreshToken', refreshToken, {
-      ...base,
-      maxAge: refreshCookieMaxAge,
-      path: REFRESH_COOKIE_PATH,
-    });
-  }
-
-  private clearWebAuthCookies(res: Response): void {
-    const base = this.webCookieBase();
-    res.clearCookie('accessToken', { ...base, path: '/' });
-    res.clearCookie('refreshToken', { ...base, path: REFRESH_COOKIE_PATH });
-  }
-
-  @Get('google')
-  @ApiOperation({ summary: 'Redirect to Google OAuth' })
-  @UseGuards(AuthGuard('google'))
-  async googleAuth() {
-    // Passport handles redirect to OAuth provider.
-  }
-
-  @Throttle(THROTTLE_AUTH_SENSITIVE)
-  @Get('google/callback')
-  @ApiOperation({ summary: 'Callback from Google OAuth' })
-  @UseGuards(AuthGuard('google'))
-  async googleCallback(@Req() req: OAuthRequest, @Res() res: Response) {
-    const userAgent = req.headers['user-agent'];
-    const ip = getClientIp(req);
-
-    const result = await this.authService.oAuthLogin({
-      ...req.user,
-      userAgent,
+    const redirectUrl = await this.googleOauth.buildAuthorizationUrl({
+      returnTo,
       ip,
-      deviceName: 'web',
-      platform: 'web',
+      userAgent,
     });
 
-    const frontendUrl = this.configService.getOrThrow<string>('web.frontendUrl');
-    const callbackUrl = new URL('/auth/callback', frontendUrl);
-
-    this.setWebAuthCookies(res, result.accessToken, result.refreshToken);
-
-    return res.redirect(callbackUrl.toString());
+    return { redirectUrl };
   }
 
-  @Throttle(THROTTLE_AUTH_SENSITIVE)
-  @Post('refresh')
-  @ApiOperation({ summary: 'Rotate refresh token and return new access token' })
-  @ZodResponse({ type: RefreshResponseDto })
-  async refresh(@Req() req: RefreshTokenRequest, @Res({ passthrough: true }) res: Response) {
-    const token = this.extractRefreshToken(req);
+  /**
+   * Google redirects the browser here with `?code=&state=`. We verify state
+   * (atomic one-time consume), exchange the code (PKCE), validate the ID token
+   * (signature/nonce/iss/aud/exp), then create a session and redirect to
+   * the safe `returnTo` on the frontend with cookies attached.
+   */
+  @Public()
+  @Get('google/callback')
+  async googleCallback(@Req() req: Request, @Res() res: Response): Promise<void> {
+    // Reconstruct the full URL of *this* request so openid-client can parse
+    // ?code & ?state from the callback. `app.set('trust proxy', true)` in main.ts
+    // makes req.protocol reflect Cloudflare's X-Forwarded-Proto (https).
+    const host = req.headers.host ?? '';
+    const fullUrl = new URL(req.originalUrl, `${req.protocol}://${host}`);
 
-    const data = await this.authService.refresh(token);
-    this.setWebAuthCookies(res, data.accessToken, data.refreshToken);
-    return { accessToken: data.accessToken, refreshToken: data.refreshToken };
-  }
+    try {
+      const profile = await this.googleOauth.handleCallback(fullUrl);
+      const ip = getClientIp(req) ?? null;
+      const userAgent = req.headers['user-agent'] ?? null;
+      const client: SessionClient = 'web';
 
-  @Get('me')
-  @ApiOperation({ summary: 'Return current user by access token' })
-  @ZodResponse({ type: MeResponseDto })
-  @UseGuards(JwtAuthGuard)
-  async me(@Req() req: AuthenticatedRequest) {
-    return this.authService.meByUserId(req.user.sub);
-  }
+      const { accessToken, refreshRaw } = await this.authService.loginWithGoogle({
+        profile,
+        client,
+        ip,
+        userAgent,
+      });
 
-  @Post('protected')
-  @ApiOperation({ summary: 'Protected route' })
-  @UseGuards(JwtAuthGuard)
-  protected() {
-    return this.authService.protected();
-  }
+      setAuthCookies({
+        res,
+        accessToken,
+        refreshRaw,
+        refreshTtlMs: this.tokens.getRefreshTtlMs(client),
+        authCfg: this.auth,
+        appEnv: this.app.NODE_ENV,
+      });
 
-  @Throttle(THROTTLE_AUTH_SENSITIVE)
-  @Post('logout')
-  @ApiOperation({ summary: 'Revoke current refresh token session' })
-  @ZodResponse({ type: LogoutResponseDto })
-  async logout(@Req() req: RefreshTokenRequest, @Res({ passthrough: true }) res: Response) {
-    const token = this.readRefreshTokenInput(req);
-    if (token) {
-      await this.authService.logout(token);
+      const target = safeReturnTo(profile.returnTo, this.web.frontendUrl);
+      res.redirect(302, target);
+    } catch (error) {
+      this.logger.warn({ err: error }, 'OAuth callback failed');
+      const message =
+        error instanceof OAuthStateError
+          ? error.reason
+          : ((error as { message?: string }).message ?? 'oauth_failed');
+      const target = new URL('/login', this.web.frontendUrl);
+      target.searchParams.set('error', message);
+      res.redirect(302, target.toString());
     }
-    this.clearWebAuthCookies(res);
-    return { ok: true as const };
   }
 
-  @Throttle(THROTTLE_AUTH_SENSITIVE)
-  @Post('logout-all')
-  @ApiOperation({ summary: 'Revoke all sessions for current user' })
-  @ZodResponse({ type: LogoutResponseDto })
-  @UseGuards(JwtAuthGuard)
-  async logoutAll(@Req() req: AuthenticatedRequest, @Res({ passthrough: true }) res: Response) {
-    const userAgent = req.headers['user-agent'];
-    const ip = getClientIp(req);
-    const result = await this.authService.logoutAll(req.user.sub, { userAgent, ip });
-    this.clearWebAuthCookies(res);
-    return result;
+  /**
+   * Rotate refresh-token + access token. Reads refresh from httpOnly cookie
+   * (web) or Authorization: Bearer (mobile, later). On reuse detection the
+   * entire user's session chain is revoked (handled inside SessionService).
+   */
+  @Public()
+  @Post('refresh')
+  async refresh(@Req() req: Request, @Res() res: Response): Promise<void> {
+    const refreshFromCookie = (req as Request & { cookies: Record<string, string | undefined> })
+      .cookies?.[COOKIE_REFRESH];
+    const refreshFromHeader = readBearerToken(req.headers.authorization);
+    const refreshRaw = refreshFromCookie ?? refreshFromHeader;
+
+    if (!refreshRaw) {
+      throw new UnauthorizedException('refresh_missing');
+    }
+
+    const ip = getClientIp(req) ?? null;
+    const userAgent = req.headers['user-agent'] ?? null;
+
+    try {
+      const { session, refreshRaw: newRefreshRaw } = await this.sessions.rotate({
+        refreshRaw,
+        ip,
+        userAgent,
+      });
+
+      const user = await this.prisma.user.findUniqueOrThrow({
+        where: { id: session.userId },
+        select: { id: true, role: true, disabledAt: true },
+      });
+
+      if (user.disabledAt) {
+        clearAuthCookies(res, this.auth, this.app.NODE_ENV);
+        await this.sessions.revoke(session.id, { ip, userAgent });
+        throw new UnauthorizedException('account_disabled');
+      }
+
+      const accessToken = await this.tokens.signAccess({
+        userId: user.id,
+        role: user.role,
+        sid: session.id,
+      });
+
+      const client = (session.client as SessionClient) ?? 'web';
+      setAuthCookies({
+        res,
+        accessToken,
+        refreshRaw: newRefreshRaw,
+        refreshTtlMs: this.tokens.getRefreshTtlMs(client),
+        authCfg: this.auth,
+        appEnv: this.app.NODE_ENV,
+      });
+
+      res.json({ ok: true });
+    } catch (error) {
+      clearAuthCookies(res, this.auth, this.app.NODE_ENV);
+      if (error instanceof InvalidRefreshTokenError) {
+        throw new UnauthorizedException(error.message);
+      }
+      throw error;
+    }
   }
+
+  /**
+   * End the current session (revoke its refresh chain). The access token from
+   * a leaked JWT remains valid until expiry, but `isSessionActive` (Redis-cached)
+   * will start returning false within ~30s of this call, so the guard rejects it.
+   */
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  async logout(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ ok: true }> {
+    await this.sessions.revoke(user.sid, {
+      ip: getClientIp(req) ?? null,
+      userAgent: req.headers['user-agent'] ?? null,
+    });
+    clearAuthCookies(res, this.auth, this.app.NODE_ENV);
+    return { ok: true };
+  }
+
+  /**
+   * Revoke ALL active sessions for the current user (every device).
+   * Step-up reauth: requires the access JWT to have been issued in the last
+   * 5 minutes; otherwise client must re-login before performing this destructive op.
+   */
+  @Post('logout-all')
+  @HttpCode(HttpStatus.OK)
+  async logoutAll(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ ok: true; revoked: number }> {
+    const ageSec = Math.floor(Date.now() / 1000) - user.iat;
+    if (ageSec > 5 * 60) {
+      throw new ForbiddenException('reauth_required');
+    }
+
+    const revoked = await this.sessions.revokeAllForUser(user.id, {
+      ip: getClientIp(req) ?? null,
+      userAgent: req.headers['user-agent'] ?? null,
+    });
+    clearAuthCookies(res, this.auth, this.app.NODE_ENV);
+    return { ok: true, revoked };
+  }
+
+  /**
+   * Returns the authenticated user — used by the frontend BFF / RSC to render
+   * the current session context. Always reads fresh from the DB (no client caching)
+   * so that role changes / profile updates propagate immediately.
+   */
+  @Get('me')
+  async me(@CurrentUser() user: AuthenticatedUser) {
+    const dbUser = await this.prisma.user.findUniqueOrThrow({
+      where: { id: user.id },
+      select: {
+        id: true,
+        email: true,
+        emailVerified: true,
+        name: true,
+        avatarUrl: true,
+        role: true,
+      },
+    });
+    return { user: dbUser };
+  }
+}
+
+function readBearerToken(header: string | string[] | undefined): string | null {
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(raw.trim());
+  return match?.[1] ?? null;
 }

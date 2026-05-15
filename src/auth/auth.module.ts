@@ -1,34 +1,62 @@
 import { Module } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtModule, type JwtModuleOptions } from '@nestjs/jwt';
-import { PassportModule } from '@nestjs/passport';
-import { AuthAuditService } from './auth-audit.service';
+import { ConfigModule, ConfigType } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+
+import { authConfig, cloudflareConfig, oauthConfig, webConfig } from '../config/configuration';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
-import { PrismaModule } from '../prisma/prisma.module';
+import { GoogleOAuthService } from './google-oauth.service';
+import { CsrfGuard } from './guards/csrf.guard';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RolesGuard } from './guards/roles.guard';
+import { SessionService } from './session.service';
+import { TokenService } from './token.service';
+import { TurnstileService } from './turnstile.service';
 
-import { GoogleStrategy } from './strategies/google.strategy';
-import { JwtStrategy } from './strategies/jwt.strategy';
 @Module({
   imports: [
-    PrismaModule,
-    PassportModule,
+    ConfigModule.forFeature(cloudflareConfig),
+    ConfigModule.forFeature(authConfig),
+    ConfigModule.forFeature(oauthConfig),
+    ConfigModule.forFeature(webConfig),
     JwtModule.registerAsync({
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        secret: configService.getOrThrow<string>('auth.jwtAccessSecret'),
+      inject: [authConfig.KEY],
+      useFactory: (config: ConfigType<typeof authConfig>) => ({
+        secret: config.jwtAccessSecret,
         signOptions: {
-          expiresIn: configService.getOrThrow<string>('auth.accessTtl') as NonNullable<
-            JwtModuleOptions['signOptions']
-          >['expiresIn'],
-          algorithm: 'HS256' as const,
-          issuer: configService.getOrThrow<string>('auth.jwtIssuer'),
-          audience: configService.getOrThrow<string>('auth.jwtAudience'),
+          algorithm: 'HS256',
+          issuer: config.jwtIssuer,
+          audience: config.jwtAudience,
+          // JwtModule typings require StringValue | number; pass seconds derived from the parsed ms value.
+          expiresIn: Math.floor(config.accessTokenCookieMaxAgeMs / 1000),
+        },
+        verifyOptions: {
+          algorithms: ['HS256'],
+          issuer: config.jwtIssuer,
+          audience: config.jwtAudience,
         },
       }),
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthAuditService, AuthService, GoogleStrategy, JwtStrategy],
+  providers: [
+    AuthService,
+    TurnstileService,
+    TokenService,
+    SessionService,
+    GoogleOAuthService,
+    JwtAuthGuard,
+    RolesGuard,
+    CsrfGuard,
+  ],
+  exports: [
+    TurnstileService,
+    TokenService,
+    SessionService,
+    GoogleOAuthService,
+    JwtAuthGuard,
+    RolesGuard,
+    CsrfGuard,
+  ],
 })
 export class AuthModule {}

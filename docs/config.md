@@ -31,25 +31,25 @@
 
 Файл: **`src/config/configuration.ts`**, об'єкт **`validationSchema`**.
 
-| Змінна оточення | Обов'язковість | Примітка |
-|-----------------|----------------|----------|
-| **`PORT`** | опційно | `1..65535`, за замовчуванням **`3000`**. |
-| **`NODE_ENV`** | так | `development` \| `production` \| `test`. |
-| **`DATABASE_URL`** | так | Рядок підключення Postgres (не валідація URL, мінімум непустий). |
-| **`JWT_ACCESS_SECRET`** | так | Секрет підпису access JWT. |
-| **`JWT_ISSUER`** | так | Claim **`iss`** (підпис і `JwtStrategy` мають збігатися). |
-| **`JWT_AUDIENCE`** | так | Claim **`aud`**. |
-| **`JWT_ACCESS_TTL`** | опційно | Рядок тривалості (на кшталт **`15m`**, **`1h`**); за замовчуванням **`1m`**. Також задає **`maxAge`** access-cookie. |
-| **`REFRESH_TOKEN_TTL_WEB`** | опційно | Sliding refresh для **`Session.client = web`**; дефолт **`14d`**. |
-| **`REFRESH_TOKEN_TTL_MOBILE`** | опційно | Для **`ios`** / **`android`**; дефолт **`90d`**. |
-| **`REFRESH_TOKEN_ABSOLUTE_MAX`** | опційно | «Стеля» ланцюга **`absoluteExpiresAt`**; дефолт **`180d`**. |
-| **`COOKIE_SECRET`** | так | Секрет для **`cookie-parser`** (підписані cookies можливі в майбутньому). |
-| **`GOOGLE_CLIENT_ID`** | так | OAuth Google (web callback flow). |
-| **`GOOGLE_CLIENT_SECRET`** | так | |
-| **`GOOGLE_CALLBACK_URL`** | так | Валідний URL (redirect URI у Google Cloud). |
-| **`FRONTEND_URL`** | так | Канонічний URL веб-застосунку; редірект після OAuth: **`/auth/callback`**. |
-| **`CORS_URL`** | опційно | Додаткові browser origins через **кому**; **`FRONTEND_URL`** завжди у списку CORS. Порожній рядок за замовчуванням. |
-| **`COOKIE_DOMAIN`** | опційно | Підмножина **`Domain`** для auth-cookies (наприклад **`.example.com`**). Порожньо на localhost / без спільного parent-домену. |
+| Змінна оточення                  | Обов'язковість | Примітка                                                                                                                      |
+| -------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **`PORT`**                       | опційно        | `1..65535`, за замовчуванням **`3000`**.                                                                                      |
+| **`NODE_ENV`**                   | так            | `development` \| `production` \| `test`.                                                                                      |
+| **`DATABASE_URL`**               | так            | Рядок підключення Postgres (не валідація URL, мінімум непустий).                                                              |
+| **`JWT_ACCESS_SECRET`**          | так            | Секрет підпису access JWT.                                                                                                    |
+| **`JWT_ISSUER`**                 | так            | Claim **`iss`** (підпис і `JwtStrategy` мають збігатися).                                                                     |
+| **`JWT_AUDIENCE`**               | так            | Claim **`aud`**.                                                                                                              |
+| **`JWT_ACCESS_TTL`**             | опційно        | Рядок тривалості (на кшталт **`15m`**, **`1h`**); за замовчуванням **`1m`**. Також задає **`maxAge`** access-cookie.          |
+| **`REFRESH_TOKEN_TTL_WEB`**      | опційно        | Sliding refresh для **`Session.client = web`**; дефолт **`14d`**.                                                             |
+| **`REFRESH_TOKEN_TTL_MOBILE`**   | опційно        | Для **`ios`** / **`android`**; дефолт **`90d`**.                                                                              |
+| **`REFRESH_TOKEN_ABSOLUTE_MAX`** | опційно        | «Стеля» ланцюга **`absoluteExpiresAt`**; дефолт **`180d`**.                                                                   |
+| **`COOKIE_SECRET`**              | так            | Секрет для **`cookie-parser`** (підписані cookies можливі в майбутньому).                                                     |
+| **`GOOGLE_CLIENT_ID`**           | так            | OAuth Google (web callback flow).                                                                                             |
+| **`GOOGLE_CLIENT_SECRET`**       | так            |                                                                                                                               |
+| **`GOOGLE_CALLBACK_URL`**        | так            | Валідний URL (redirect URI у Google Cloud).                                                                                   |
+| **`FRONTEND_URL`**               | так            | Канонічний URL веб-застосунку; редірект після OAuth: **`/auth/callback`**.                                                    |
+| **`CORS_URL`**                   | опційно        | Додаткові browser origins через **кому**; **`FRONTEND_URL`** завжди у списку CORS. Порожній рядок за замовчуванням.           |
+| **`COOKIE_DOMAIN`**              | опційно        | Підмножина **`Domain`** для auth-cookies (наприклад **`.example.com`**). Порожньо на localhost / без спільного parent-домену. |
 
 Повний приклад імен див. **`.env.example`** у корені `backend/`.
 
@@ -57,29 +57,29 @@
 
 ## Namespace `app` (`registerAs('app', ...)`)
 
-| Ключ `ConfigService` | Джерело | Опис |
-|----------------------|---------|------|
-| **`app.PORT`** | `PORT` | Порт HTTP сервера. |
-| **`app.NODE_ENV`** | `NODE_ENV` | Режим застосунку. |
+| Ключ `ConfigService` | Джерело    | Опис               |
+| -------------------- | ---------- | ------------------ |
+| **`app.PORT`**       | `PORT`     | Порт HTTP сервера. |
+| **`app.NODE_ENV`**   | `NODE_ENV` | Режим застосунку.  |
 
 ---
 
 ## Namespace `auth` (`registerAs('auth', ...)`)
 
-| Ключ `ConfigService` | Джерело / похідне | Опис |
-|----------------------|-------------------|------|
-| **`auth.jwtAccessSecret`** | `JWT_ACCESS_SECRET` | Підпис access JWT. |
-| **`auth.cookieSecret`** | `COOKIE_SECRET` | Секрет cookie-parser. |
-| **`auth.jwtIssuer`** | `JWT_ISSUER` | `iss` у JWT. |
-| **`auth.jwtAudience`** | `JWT_AUDIENCE` | `aud` у JWT. |
-| **`auth.accessTtl`** | `JWT_ACCESS_TTL` | Рядок TTL для `JwtModule` / `sign`. |
+| Ключ `ConfigService`                 | Джерело / похідне            | Опис                                                       |
+| ------------------------------------ | ---------------------------- | ---------------------------------------------------------- |
+| **`auth.jwtAccessSecret`**           | `JWT_ACCESS_SECRET`          | Підпис access JWT.                                         |
+| **`auth.cookieSecret`**              | `COOKIE_SECRET`              | Секрет cookie-parser.                                      |
+| **`auth.jwtIssuer`**                 | `JWT_ISSUER`                 | `iss` у JWT.                                               |
+| **`auth.jwtAudience`**               | `JWT_AUDIENCE`               | `aud` у JWT.                                               |
+| **`auth.accessTtl`**                 | `JWT_ACCESS_TTL`             | Рядок TTL для `JwtModule` / `sign`.                        |
 | **`auth.accessTokenCookieMaxAgeMs`** | обчислено з `JWT_ACCESS_TTL` | `parseDurationMs` — для **`maxAge`** cookie `accessToken`. |
-| **`auth.refreshTokenTtlWeb`** | `REFRESH_TOKEN_TTL_WEB` | Рядок TTL (web). |
-| **`auth.refreshTokenTtlMobile`** | `REFRESH_TOKEN_TTL_MOBILE` | Рядок TTL (mobile client). |
-| **`auth.refreshTokenAbsoluteMax`** | `REFRESH_TOKEN_ABSOLUTE_MAX` | Рядок absolute cap. |
-| **`auth.refreshTokenTtlWebMs`** | обчислено | Мілісекунди для сесій / cookie refresh (web). |
-| **`auth.refreshTokenTtlMobileMs`** | обчислено | Мілісекунди для mobile client. |
-| **`auth.refreshTokenAbsoluteMaxMs`** | обчислено | Мілісекунди для cap ланцюга refresh. |
+| **`auth.refreshTokenTtlWeb`**        | `REFRESH_TOKEN_TTL_WEB`      | Рядок TTL (web).                                           |
+| **`auth.refreshTokenTtlMobile`**     | `REFRESH_TOKEN_TTL_MOBILE`   | Рядок TTL (mobile client).                                 |
+| **`auth.refreshTokenAbsoluteMax`**   | `REFRESH_TOKEN_ABSOLUTE_MAX` | Рядок absolute cap.                                        |
+| **`auth.refreshTokenTtlWebMs`**      | обчислено                    | Мілісекунди для сесій / cookie refresh (web).              |
+| **`auth.refreshTokenTtlMobileMs`**   | обчислено                    | Мілісекунди для mobile client.                             |
+| **`auth.refreshTokenAbsoluteMaxMs`** | обчислено                    | Мілісекунди для cap ланцюга refresh.                       |
 
 Допоміжна логіка тривалостей: **`src/utils/parse-duration.ts`**.
 
@@ -87,19 +87,19 @@
 
 ## Namespace `oauth` (`registerAs('oauth', ...)`)
 
-| Ключ `ConfigService` | Джерело | Опис |
-|----------------------|---------|------|
-| **`oauth.googleClientId`** | `GOOGLE_CLIENT_ID` | |
-| **`oauth.googleClientSecret`** | `GOOGLE_CLIENT_SECRET` | |
-| **`oauth.googleCallbackUrl`** | `GOOGLE_CALLBACK_URL` | Callback URL для Passport Google strategy. |
+| Ключ `ConfigService`           | Джерело                | Опис                                       |
+| ------------------------------ | ---------------------- | ------------------------------------------ |
+| **`oauth.googleClientId`**     | `GOOGLE_CLIENT_ID`     |                                            |
+| **`oauth.googleClientSecret`** | `GOOGLE_CLIENT_SECRET` |                                            |
+| **`oauth.googleCallbackUrl`**  | `GOOGLE_CALLBACK_URL`  | Callback URL для Passport Google strategy. |
 
 ---
 
 ## Namespace `web` (`registerAs('web', ...)`)
 
-| Ключ `ConfigService` | Джерело / похідне | Опис |
-|----------------------|-------------------|------|
-| **`web.frontendUrl`** | `FRONTEND_URL` | База для редіректу після OAuth. |
+| Ключ `ConfigService`  | Джерело / похідне                        | Опис                                                                      |
+| --------------------- | ---------------------------------------- | ------------------------------------------------------------------------- |
+| **`web.frontendUrl`** | `FRONTEND_URL`                           | База для редіректу після OAuth.                                           |
 | **`web.corsOrigins`** | `FRONTEND_URL` + розбитий **`CORS_URL`** | Масив унікальних URL для **`enableCors({ origin, credentials: true })`**. |
 
 ---

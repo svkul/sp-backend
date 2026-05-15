@@ -14,7 +14,7 @@ export const validationSchema = z.object({
   JWT_AUDIENCE: z.string().min(1),
   /** Access token lifetime, e.g. "15m", "1h". */
   JWT_ACCESS_TTL: z.string().min(1).default('1m'),
-  /** Sliding refresh TTL for web sessions (cookie + Session.client = web). */
+  /** Sliding refresh TTL for browser sessions (web + mobile browser; HttpOnly refresh cookie). */
   REFRESH_TOKEN_TTL_WEB: z.string().min(1).default('14d'),
   /** Sliding refresh TTL for mobile clients (ios / android). */
   REFRESH_TOKEN_TTL_MOBILE: z.string().min(1).default('90d'),
@@ -33,6 +33,9 @@ export const validationSchema = z.object({
    * Leave empty on localhost / single-host dev.
    */
   COOKIE_DOMAIN: z.string().optional().default(''),
+  REDIS_URL: z.url(),
+  /** Cloudflare Turnstile secret key (server-side verification of widget tokens). */
+  CLOUD_FLARE_TURNSTILE_SECRET_KEY: z.string().min(1),
 });
 
 type EnvConfig = z.infer<typeof validationSchema>;
@@ -108,3 +111,21 @@ export const webConfig = registerAs('web', () => {
 });
 
 export type WebConfig = ConfigType<typeof webConfig>;
+
+export const redisConfig = registerAs('redis', () => {
+  const env = parseEnv();
+  return {
+    url: env.REDIS_URL,
+  };
+});
+
+export type RedisConfig = ConfigType<typeof redisConfig>;
+
+export const cloudflareConfig = registerAs('cloudflare', () => {
+  const env = parseEnv();
+  return {
+    turnstileSecret: env.CLOUD_FLARE_TURNSTILE_SECRET_KEY,
+  };
+});
+
+export type CloudflareConfig = ConfigType<typeof cloudflareConfig>;

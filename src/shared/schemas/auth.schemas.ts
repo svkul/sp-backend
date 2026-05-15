@@ -1,13 +1,24 @@
 import { z } from 'zod';
 
+export const accessTokenPayloadSchema = z.object({
+  sub: z.string().min(1),
+  role: z.enum(['USER', 'ADMIN']),
+  sid: z.string().min(1),
+  iss: z.string().optional(),
+  aud: z.union([z.string(), z.array(z.string())]).optional(),
+  iat: z.number().optional(),
+  exp: z.number().optional(),
+});
+
+export type AccessTokenPayload = z.infer<typeof accessTokenPayloadSchema>;
+
 export const tokenPairResponseSchema = z.object({
   accessToken: z.string(),
   refreshToken: z.string(),
 });
 
 export const refreshResponseSchema = z.object({
-  accessToken: z.string(),
-  refreshToken: z.string(),
+  ok: z.boolean(),
 });
 
 export const authUserSchema = z.object({
@@ -33,10 +44,23 @@ export const sessionResponseSchema = z.object({
   authenticated: z.boolean(),
 });
 
+export const googleStartRequestSchema = z.object({
+  turnstileToken: z.string().min(1),
+  returnTo: z.string().max(2048).optional().nullable(),
+});
+
+export const googleStartResponseSchema = z.object({
+  redirectUrl: z.string().url(),
+});
+
+export type GoogleStartRequest = z.infer<typeof googleStartRequestSchema>;
+export type GoogleStartResponse = z.infer<typeof googleStartResponseSchema>;
+
 export const oauthLoginProfileSchema = z.object({
   provider: z.string().min(1),
   providerAccountId: z.string().min(1),
   email: z.string().email(),
+  emailVerified: z.boolean(),
   name: z.string().optional(),
   avatarUrl: z.string().url().optional(),
   userAgent: z.string().optional(),
